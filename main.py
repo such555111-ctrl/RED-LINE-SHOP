@@ -64,6 +64,22 @@ except ValueError:
     FREE_DELIVERY_FROM = 990
 
 
+# Способы оплаты доставки: настраиваются для каждого района
+PAYMENT_LABELS = {"prepay": "Предоплата", "courier": "Оплата курьеру по договорённости"}
+PAYMENT_MODES = ("prepay", "courier", "both")
+
+
+def district_payment(d):
+    """Условие оплаты района: prepay | courier | both (у старых районов без настройки — both)."""
+    v = d.get("payment")
+    return v if v in PAYMENT_MODES else "both"
+
+
+def allowed_payments(d):
+    mode = district_payment(d)
+    return ["prepay", "courier"] if mode == "both" else [mode]
+
+
 def delivery_fee_for(goods_total, base_fee=None):
     """Стоимость доставки: 0 ₽ от FREE_DELIVERY_FROM, иначе цена района (base_fee) или DELIVERY_FEE,
     если районы не настроены."""
@@ -883,6 +899,7 @@ def admin_product(p):
 def public_order(o):
     """Заказ для покупателя: без закупочных цен и прибыли."""
     d = {k: v for k, v in o.items() if k not in ("profit_total", "profit_complete")}
+    d["status_history"] = [{"status": h["status"], "label": h["label"], "at": h["at"]} for h in order_history(o)]
     d["items"] = [{k: v for k, v in i.items() if k not in ("cost_price", "unit_profit", "profit")}
                   if isinstance(i, dict) else i for i in (o.get("items") or [])]
     return d
@@ -923,6 +940,7 @@ def admin_order(o, cost_by_id=None):
             total += (price - cost) * qty
         items.append(it)
     d["items"] = items
+    d["status_history"] = order_history(o)
     d["profit_total"] = _num(round(total, 2))
     d["profit_complete"] = complete        # False — у части товаров закупочная цена не задана
     return d
@@ -994,8 +1012,9 @@ def compute_promo_discount(promo, subtotal):
 # new / contacted  — «в обработке»: остатки НЕ списаны, кешбэк не начислен (баллы к оплате зарезервированы)
 # accepted / done  — «принят»: остатки списаны, кешбэк начислен
 # rejected / cancelled — «отклонён» / «отменён»: остатки не списаны, баллы возвращены
+# courier — «передан курьеру»: как и «принят», товар уже списан со склада
 PENDING_STATUSES = {"new", "contacted"}
-ACCEPTED_STATUSES = {"accepted", "done"}
+ACCEPTED_STATUSES = {"accepted", "courier", "done"}
 CANCEL_STATUSES = {"rejected", "cancelled"}
 ALL_STATUSES = PENDING_STATUSES | ACCEPTED_STATUSES | CANCEL_STATUSES
 
@@ -1060,9 +1079,90 @@ def apply_order_status(o, target):
 
 
 ORDER_STATUS_TEXT = {
-    "new": "в обработке", "contacted": "в обработке", "accepted": "принят", "done": "выполнен",
-    "rejected": "отклонён", "cancelled": "отменён",
+    "new": "новый", "contacted": "в обработке", "accepted": "принят", "courier": "передан курьеру",
+    "done": "выполнен", "rejected": "отклонён", "cancelled": "отменён",
 }
+STATUS_LABELS = {
+    "new": "Новый", "contacted": "В обработке", "accepted": "Принят", "courier": "Передан курьеру",
+    "done": "Выполнен", "rejected": "Отклонён", "cancelled": "Отменён",
+}
+# статусы, которые администратор выставляет кнопками Telegram и в админке
+ADMIN_FLOW_STATUSES = ("new", "accepted", "courier", "done", "cancelled")
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def order_history(o):
+    """История статусов заказа: [{status, label, at, by}]. У старых заказов без истории
+    известна только дата создания (статус «Новый»)."""
+    hist = o.get("status_history")
+    if not hist:
+        hist = [{"status": "new", "at": o.get("created_at"), "by": "customer"}] if o.get("created_at") else []
+    return [{"status": h.get("status"), "label": STATUS_LABELS.get(h.get("status"), h.get("status")),
+             "at": h.get("at"), "by": h.get("by")} for h in hist]
+
+
+def set_order_status(o, target, by):
+    """Меняет статус (склад и баллы — через apply_order_status) и пишет запись в историю.
+    Возвращает (текст_ошибки | None, изменился_ли_статус). Вызывать под DATA_LOCK; сохранение — на вызывающем."""
+    old = o.get("status")
+    if target == old:
+        return None, False
+    err = apply_order_status(o, target)
+    if err:
+        return err, False
+    hist = o.setdefault("status_history", [])
+    if not hist and old == "new" and o.get("created_at"):
+        hist.append({"status": "new", "at": o["created_at"], "by": "customer"})
+    now = _now_iso()
+    hist.append({"status": target, "at": now, "by": by})
+    o["status_changed_at"] = now
+    return None, True
+
+
+def notify_customer_status(o):
+    """Сообщение покупателю в Telegram о новом статусе заказа."""
+    chat_id = o.get("customer_chat_id")
+    if not chat_id:
+        return
+    st, oid = o.get("status"), o.get("id")
+    label = STATUS_LABELS.get(st, st)
+    sp, cb = int(o.get("points_spent") or 0), int(o.get("cashback") or 0)
+    if st == "accepted":
+        text = (f"✅ Ваш заказ RL-{oid} принят!\n\nМы свяжемся с вами в этом чате."
+                + (f"\nНачислен кешбэк: {cb} б." if cb else ""))
+    elif st == "courier":
+        text = f"🚚 Ваш заказ RL-{oid} передан курьеру."
+    elif st == "done":
+        text = f"🎉 Ваш заказ RL-{oid} выполнен. Спасибо за покупку!"
+    elif st == "rejected":
+        text = (f"❌ К сожалению, заказ RL-{oid} отклонён."
+                + (f"\nСписанные баллы ({sp} б.) возвращены." if sp else "")
+                + "\nЕсли остались вопросы — напишите менеджеру.")
+    elif st == "cancelled":
+        text = (f"❌ Заказ RL-{oid} отменён."
+                + (f"\nСписанные баллы ({sp} б.) возвращены." if sp else "")
+                + "\nЕсли остались вопросы — напишите менеджеру.")
+    else:
+        text = f"ℹ️ Статус вашего заказа RL-{oid} изменён."
+    try:
+        bot.send_message(chat_id, f"{text}\n\nСтатус заказа: {label}")
+    except Exception as e:
+        log.warning("Не удалось уведомить покупателя о статусе заказа: %s", e)
+
+
+def status_keyboard(order):
+    """Кнопки смены статуса для администратора в Telegram (без текущего статуса)."""
+    kb = types.InlineKeyboardMarkup()
+    cur = order.get("status")
+    btns = [types.InlineKeyboardButton(t, callback_data=f"ost:{code}:{order.get('id')}")
+            for code, t in (("accepted", "✅ Принят"), ("courier", "🚚 Передан курьеру"),
+                            ("done", "🏁 Выполнен"), ("cancelled", "❌ Отменён")) if code != cur]
+    for i in range(0, len(btns), 2):
+        kb.row(*btns[i:i + 2])
+    return kb
 
 
 def order_keyboard(order_id):
@@ -1088,10 +1188,11 @@ def on_order_moderation(call: types.CallbackQuery):
         bot.answer_callback_query(call.id, "Некорректные данные кнопки", show_alert=True)
         return
 
-    def finish(note):
+    def finish(note, kb=None):
         try:
-            base = call.message.text or ""
-            bot.edit_message_text(f"{base}\n\n{note}", call.message.chat.id, call.message.message_id)
+            base = (call.message.text or "").split("\n\n📌")[0]
+            bot.edit_message_text(f"{base}\n\n{note}", call.message.chat.id, call.message.message_id,
+                                  reply_markup=kb)
         except Exception as e:
             log.warning("Не удалось обновить сообщение заказа: %s", e)
 
@@ -1107,7 +1208,7 @@ def on_order_moderation(call: types.CallbackQuery):
             finish(f"ℹ️ Уже обработан: {ORDER_STATUS_TEXT.get(order.get('status'), order.get('status'))}")
             return
         try:
-            err = apply_order_status(order, "accepted" if action == "ok" else "rejected")
+            err, _changed = set_order_status(order, "accepted" if action == "ok" else "rejected", "telegram")
             if not err:
                 save_orders(orders)
         except Exception:
@@ -1120,21 +1221,58 @@ def on_order_moderation(call: types.CallbackQuery):
         accepted = action == "ok"
 
     bot.answer_callback_query(call.id, "Готово")
-    finish("✅ Заказ принят" if accepted else "❌ Заказ отклонён")
-    chat_id = order.get("customer_chat_id")
-    if chat_id:
+    if accepted:
+        finish("📌 Статус: Принят", status_keyboard(order))     # дальше — кнопки «Передан курьеру / Выполнен / Отменён»
+    else:
+        finish("❌ Заказ отклонён")
+    notify_customer_status(order)
+
+
+@bot.callback_query_handler(func=lambda c: bool(c.data) and c.data.startswith("ost:"))
+def on_order_status_button(call: types.CallbackQuery):
+    """Смена статуса заказа кнопками в Telegram: принят / передан курьеру / выполнен / отменён."""
+    if not call.from_user or call.from_user.id not in ADMIN_CHAT_IDS:
+        bot.answer_callback_query(call.id, "Нет доступа", show_alert=True)
+        return
+    try:
+        _, target, raw_id = call.data.split(":")
+        oid = int(raw_id)
+        if target not in ADMIN_FLOW_STATUSES:
+            raise ValueError
+    except ValueError:
+        bot.answer_callback_query(call.id, "Некорректные данные кнопки", show_alert=True)
+        return
+
+    with DATA_LOCK:
+        orders = load_orders()
+        order = next((o for o in orders if o.get("id") == oid), None)
+        if order is None:
+            bot.answer_callback_query(call.id, "Заказ не найден", show_alert=True)
+            return
         try:
-            if accepted:
-                cb = int(order.get("cashback") or 0)
-                bot.send_message(chat_id, f"✅ Ваш заказ RL-{oid} принят!\n\nМы свяжемся с вами в этом чате."
-                                 + (f"\nНачислен кешбэк: {cb} б." if cb else ""))
-            else:
-                sp = int(order.get("points_spent") or 0)
-                bot.send_message(chat_id, f"❌ К сожалению, заказ RL-{oid} отклонён."
-                                 + (f"\nСписанные баллы ({sp} б.) возвращены." if sp else "")
-                                 + "\nЕсли остались вопросы — напишите менеджеру.")
-        except Exception as e:
-            log.warning("Не удалось уведомить покупателя о статусе заказа: %s", e)
+            err, changed = set_order_status(order, target, "telegram")
+            if not err and changed:
+                save_orders(orders)
+        except Exception:
+            log.exception("Ошибка смены статуса заказа %s", oid)
+            bot.answer_callback_query(call.id, "Ошибка базы данных, попробуйте ещё раз", show_alert=True)
+            return
+        if err:
+            bot.answer_callback_query(call.id, err, show_alert=True)
+            return
+
+    if not changed:
+        bot.answer_callback_query(call.id, "Этот статус уже установлен")
+        return
+    bot.answer_callback_query(call.id, "Готово")
+    try:
+        base = (call.message.text or "").split("\n\n📌")[0].split("\n\n✅ Заказ принят")[0]
+        note = f"{base}\n\n📌 Статус: {STATUS_LABELS.get(target, target)}"
+        kb = None if target in ("done", "cancelled") else status_keyboard(order)
+        bot.edit_message_text(note, call.message.chat.id, call.message.message_id, reply_markup=kb)
+    except Exception as e:
+        log.warning("Не удалось обновить сообщение заказа: %s", e)
+    notify_customer_status(order)
 
 
 # --- Telegram handlers -------------------------------------------------
@@ -1211,7 +1349,8 @@ def public_config():
 def public_districts():
     """Активные районы доставки с ценами (для выбора при оформлении заказа)."""
     items = [x for x in load_districts() if x.get("active", True)]
-    resp = jsonify([{"id": x["id"], "name": x.get("name"), "fee": x.get("fee") or 0} for x in items])
+    resp = jsonify([{"id": x["id"], "name": x.get("name"), "fee": x.get("fee") or 0,
+                     "payments": allowed_payments(x)} for x in items])
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -1278,7 +1417,7 @@ def parse_delivery(raw):
         return None, "Выберите самовывоз или доставку"
 
     d = {"mode": mode, "point": None, "address": None, "asap": True, "date": None, "time": None, "fee": 0,
-         "district_id": None, "district": None, "district_fee": None}
+         "district_id": None, "district": None, "district_fee": None, "payment_method": None}
     if mode == "pickup":
         point = (raw.get("point") or "").strip()
         if point not in PICKUP_POINTS:
@@ -1304,6 +1443,16 @@ def parse_delivery(raw):
             d["district"] = dist.get("name")
             d["district_fee"] = sanitize_fee(dist.get("fee")) or 0
             d["fee"] = d["district_fee"]
+            # способ оплаты: только из разрешённых для района
+            allowed = allowed_payments(dist)
+            pm = str(raw.get("payment_method") or "").strip()
+            if not pm and len(allowed) == 1:
+                pm = allowed[0]
+            if not pm:
+                return None, "Выберите способ оплаты"
+            if pm not in allowed:
+                return None, "Этот способ оплаты недоступен для выбранного района"
+            d["payment_method"] = pm
 
     if not raw.get("asap", True):
         date_s = (raw.get("date") or "").strip()
@@ -1326,6 +1475,8 @@ def delivery_text(d):
         fee_txt = fmt_price(d["fee"]) if d.get("fee") else "бесплатно"
         line = (f"🚚 Доставка ({fee_txt}): "
                 + (f"{d['district']}, " if d.get("district") else "") + f"{d.get('address') or '—'}")
+        if d.get("payment_method"):
+            line += f"\n💳 Оплата: {PAYMENT_LABELS.get(d['payment_method'], d['payment_method'])}"
     else:
         line = f"📍 Самовывоз: {d.get('point') or '—'}"
     if d.get("asap", True):
@@ -1456,10 +1607,12 @@ def create_order():
         "discount": discount,
         "promo_code": promo.get("code") if promo else None,
         "delivery": delivery,
+        "payment_method": delivery.get("payment_method"),
         "total": total,
         "customer_chat_id": customer_chat_id,
         "customer_username": customer_username,
         "status": "new",
+        "status_history": [{"status": "new", "at": datetime.now(timezone.utc).isoformat(), "by": "customer"}],
         "stock_deducted": False,
         "cashback_credited": False,
         "goods_total": goods_total,
@@ -1552,7 +1705,8 @@ def create_order():
 
     return jsonify({"ok": True, "order_id": new_id, "total": total, "points_spent": points_to_spend,
                     "points_discount": points_discount, "cashback": cashback, "points_balance": new_balance,
-                    "delivery_fee": delivery["fee"], "district": delivery.get("district")}), 201
+                    "delivery_fee": delivery["fee"], "district": delivery.get("district"),
+                    "payment_method": delivery.get("payment_method")}), 201
 
 
 @app.route("/api/promo/check", methods=["POST"])
@@ -1620,10 +1774,11 @@ def customer_cancel_order(oid):
     if order.get("status") != "new":
         abort(400, description="Заказ уже обработан — отмена недоступна")
 
-    err = apply_order_status(order, "cancelled")   # вернёт баллы, товар на склад (если был списан)
+    err, _changed = set_order_status(order, "cancelled", "customer")   # вернёт баллы, товар на склад (если был списан)
     if err:
         abort(400, description=err)
     save_orders(orders)
+    notify_customer_status(order)
 
     for admin_id in ADMIN_CHAT_IDS:
         try:
@@ -2067,6 +2222,12 @@ def _district_name(raw):
     return " ".join(str(raw or "").split())[:64]
 
 
+def _district_out(x):
+    d = dict(x)
+    d["payment"] = district_payment(x)
+    return d
+
+
 def _district_dup(items, name, skip_id=None):
     return any(x.get("id") != skip_id and str(x.get("name", "")).casefold() == name.casefold() for x in items)
 
@@ -2074,7 +2235,7 @@ def _district_dup(items, name, skip_id=None):
 @app.route("/api/admin/districts", methods=["GET"])
 def admin_get_districts():
     require_admin()
-    return jsonify(load_districts())
+    return jsonify([_district_out(x) for x in load_districts()])
 
 
 @app.route("/api/admin/districts", methods=["POST"])
@@ -2091,11 +2252,14 @@ def admin_create_district():
     items = load_districts()
     if _district_dup(items, name):
         abort(400, description="Район с таким названием уже есть")
+    payment = data.get("payment", "both")
+    if payment not in PAYMENT_MODES:
+        abort(400, description="Некорректный способ оплаты")
     district = {"id": max([x.get("id", 0) for x in items], default=0) + 1,
-                "name": name, "fee": fee, "active": bool(data.get("active", True))}
+                "name": name, "fee": fee, "active": bool(data.get("active", True)), "payment": payment}
     items.append(district)
     save_districts(items)
-    return jsonify(district), 201
+    return jsonify(_district_out(district)), 201
 
 
 @app.route("/api/admin/districts/<int:did>", methods=["PUT"])
@@ -2120,8 +2284,12 @@ def admin_update_district(did):
                 x["fee"] = fee
             if "active" in data:
                 x["active"] = bool(data.get("active"))
+            if "payment" in data:
+                if data.get("payment") not in PAYMENT_MODES:
+                    abort(400, description="Некорректный способ оплаты")
+                x["payment"] = data.get("payment")
             save_districts(items)
-            return jsonify(x)
+            return jsonify(_district_out(x))
     abort(404, description="Район не найден")
 
 
@@ -2210,10 +2378,12 @@ def admin_update_order_status(oid):
     orders = load_orders()
     for o in orders:
         if o.get("id") == oid:
-            err = apply_order_status(o, status)   # склад и баллы следуют за статусом
+            err, changed = set_order_status(o, status, "admin")   # склад и баллы следуют за статусом
             if err:
                 abort(400, description=err)
-            save_orders(orders)
+            if changed:
+                save_orders(orders)
+                notify_customer_status(o)          # клиенту — уведомление с новым статусом
             return jsonify(admin_order(o))
     abort(404, description="Заказ не найден")
 
@@ -2250,6 +2420,11 @@ def admin_message_customer(oid):
     })
     if order.get("status") == "new":
         order["status"] = "contacted"
+        _hist = order.setdefault("status_history", [])
+        if not _hist and order.get("created_at"):
+            _hist.append({"status": "new", "at": order["created_at"], "by": "customer"})
+        order["status_changed_at"] = _now_iso()
+        _hist.append({"status": "contacted", "at": order["status_changed_at"], "by": "admin"})
     save_orders(orders)
     return jsonify(admin_order(order))
 

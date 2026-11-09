@@ -381,6 +381,7 @@
   .order-status{font-size:10px;letter-spacing:.06em;text-transform:uppercase;padding:6px 11px;border-radius:8px;border:1.5px solid;white-space:nowrap;flex:0 0 auto;font-weight:800;font-family:var(--font-heading);}
   .status-new{color:var(--gold);border-color:var(--gold);background:rgba(255,90,99,.1);}
   .status-contacted{color:#D01B28;border-color:#D01B28;background:rgba(230,36,48,.12);}
+  .status-courier{color:var(--gold);border-color:var(--gold);background:rgba(255,90,99,.1);}
   .status-done,.status-accepted{color:var(--lime);border-color:var(--lime);background:rgba(127,217,154,.1);}
   .status-cancelled,.status-rejected{color:var(--danger);border-color:var(--danger);background:rgba(229,84,107,.1);}
   .order-items{font-size:13px;color:var(--muted);line-height:1.8;margin:8px 0 6px;}
@@ -1544,6 +1545,10 @@
         <div class="label" style="margin-top:14px;">Район доставки</div>
         <select id="coDistrict" class="text-input"></select>
       </div>
+      <div id="coPaymentWrap" style="display:none;">
+        <div class="label" style="margin-top:14px;">Способ оплаты</div>
+        <div class="sizes" id="coPayment" style="margin-bottom:6px;"></div>
+      </div>
       <div class="label" style="margin-top:14px;">Адрес доставки</div>
       <textarea id="coAddress" class="text-input" style="min-height:64px;" placeholder="Улица, дом, подъезд, этаж, квартира"></textarea>
       <div id="coFreeHint" style="display:none;margin-top:8px;font-size:12.5px;font-weight:600;color:var(--accent-soft);"></div>
@@ -2524,7 +2529,7 @@ document.getElementById('favBtn').onclick = () => { renderFavorites(); openSheet
 document.getElementById('profileBtn').onclick = () => { openSheet('profileSheet'); renderProfile(); };
 
 // --- профиль и история заказов -----------------------------------------
-const ORDER_STATUS_LABEL = { new:'В обработке', contacted:'В обработке', accepted:'Принят', done:'Выполнен', rejected:'Отклонён', cancelled:'Отменён' };
+const ORDER_STATUS_LABEL = { new:'Новый', contacted:'В обработке', accepted:'Принят', courier:'Передан курьеру', done:'Выполнен', rejected:'Отклонён', cancelled:'Отменён' };
 
 function renderProfile(){
   const user = tgUser();
@@ -2708,7 +2713,8 @@ document.getElementById('qSubmitBtn').onclick = submitQuestion;
 
 
 // --- Оформление: самовывоз / доставка / время ---
-var coState = { mode:'pickup', point:null, when:'asap', district:null };
+var coState = { mode:'pickup', point:null, when:'asap', district:null, payment:null };
+var PAYMENT_LABELS = { prepay:'Предоплата', courier:'Оплата курьеру по договорённости' };
 
 function pad2(n){ return String(n).padStart(2,'0'); }
 function todayStr(){ const d = new Date(); return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`; }
@@ -2763,6 +2769,14 @@ function renderCheckoutOpts(){
   dSel.innerHTML = '<option value="">Выберите район…</option>' + DISTRICTS.map(d =>
     `<option value="${d.id}">${escHtml(d.name)} — ${d.fee ? fmt(d.fee) : 'бесплатно'}</option>`).join('');
   dSel.value = coState.district === null ? '' : String(coState.district);
+  // способ оплаты: только доступные для выбранного района
+  const curD = districtById(coState.district);
+  const pays = curD && Array.isArray(curD.payments) ? curD.payments : [];
+  if (!pays.includes(coState.payment)) coState.payment = pays.length === 1 ? pays[0] : null;
+  document.getElementById('coPaymentWrap').style.display = pays.length ? '' : 'none';
+  const payBox = document.getElementById('coPayment');
+  payBox.innerHTML = pays.map(p => `<button type="button" class="size-btn ${p===coState.payment?'active':''}" data-pay="${p}">${PAYMENT_LABELS[p] || p}</button>`).join('');
+  payBox.querySelectorAll('.size-btn').forEach(b => b.onclick = () => { coState.payment = b.dataset.pay; renderCheckoutOpts(); });
   document.getElementById('coPickupBox').style.display = coState.mode === 'pickup' ? '' : 'none';
   document.getElementById('coDeliveryBox').style.display = coState.mode === 'delivery' ? '' : 'none';
   document.getElementById('coTimeBox').style.display = coState.when === 'time' ? '' : 'none';
@@ -2775,7 +2789,8 @@ function renderCheckoutOpts(){
 }
 document.getElementById('coDistrict').onchange = e => {
   coState.district = e.target.value ? Number(e.target.value) : null;
-  updateCheckoutSummary();
+  coState.payment = null;
+  renderCheckoutOpts();
 };
 function loadDistricts(){
   return fetch('/api/districts', { cache:'no-store' }).then(r => r.ok ? r.json() : null).then(list => {
@@ -2789,7 +2804,7 @@ renderCheckoutOpts();
 
 function deliveryLine(d){
   if (!d) return '';
-  const place = d.mode === 'delivery' ? `🚚 Доставка: ${d.district ? escHtml(d.district) + ', ' : ''}${d.address||'—'}` : `📍 Самовывоз: ${d.point||'—'}`;
+  const place = d.mode === 'delivery' ? `🚚 Доставка: ${d.district ? escHtml(d.district) + ', ' : ''}${d.address||'—'}${d.payment_method ? '<br>💳 ' + (PAYMENT_LABELS[d.payment_method] || d.payment_method) : ''}` : `📍 Самовывоз: ${d.point||'—'}`;
   let when = '⚡ Как можно скорее';
   if (!d.asap && d.date){
     const [y,m,dd] = d.date.split('-');
@@ -2840,6 +2855,9 @@ async function submitOrder(){
   if (coState.mode === 'delivery' && DISTRICTS.length && !districtById(coState.district)){
     return fail('Выберите район доставки', document.getElementById('coDistrict'));
   }
+  if (coState.mode === 'delivery' && DISTRICTS.length && !coState.payment){
+    return fail('Выберите способ оплаты', null);
+  }
   if (coState.mode === 'delivery' && addrEl.value.trim().length < 5){
     return fail('Укажите адрес доставки', addrEl);
   }
@@ -2864,6 +2882,7 @@ async function submitOrder(){
       point: coState.mode === 'pickup' ? coState.point : null,
       address: coState.mode === 'delivery' ? addrEl.value.trim() : null,
       district_id: coState.mode === 'delivery' ? coState.district : null,
+      payment_method: coState.mode === 'delivery' && DISTRICTS.length ? coState.payment : null,
       asap: coState.when === 'asap',
       date: coState.when === 'time' ? dateEl.value : null,
       time: coState.when === 'time' ? timeEl.value : null,

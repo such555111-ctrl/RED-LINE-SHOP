@@ -323,6 +323,7 @@
   }
   .status-new{color:var(--gold);border-color:var(--gold);background:rgba(255,90,99,.1);}
   .status-contacted{color:#D01B28;border-color:#D01B28;background:rgba(230,36,48,.12);}
+  .status-courier{color:var(--gold);border-color:var(--gold);background:rgba(255,90,99,.1);}
   .status-done,.status-accepted{color:var(--ok);border-color:var(--ok);background:rgba(127,217,154,.1);}
   .status-cancelled,.status-rejected{color:var(--danger);border-color:var(--danger);background:rgba(229,84,107,.1);}
   .order-items{font-size:12px;color:var(--muted);margin:12px 0;line-height:1.7;position:relative;z-index:1;}
@@ -984,7 +985,7 @@ async function deleteProduct(id){
 // --- Orders ------------------------------------------------------------
 
 function statusLabel(s){
-  return { new:'В обработке', contacted:'В обработке (связались)', accepted:'Принят', done:'Выполнен', rejected:'Отклонён', cancelled:'Отменён' }[s] || s;
+  return { new:'Новый', contacted:'В обработке (связались)', accepted:'Принят', courier:'Передан курьеру', done:'Выполнен', rejected:'Отклонён', cancelled:'Отменён' }[s] || s;
 }
 
 function refreshOrdersBadge(){
@@ -1017,7 +1018,7 @@ function renderOrders(){
         <span class="status-badge status-${o.status}">${statusLabel(o.status)}</span>
       </div>
       <div class="order-items">${(o.items||[]).map(i=>`${i.name} (${i.size||'—'}) × ${i.qty}` + (i.profit != null ? ` <span class="muted">· закупка ${fmt(i.cost_price)} · прибыль ${fmt(i.unit_profit)}/шт. = <b style="color:${i.profit < 0 ? 'var(--danger)' : 'var(--lime)'};">${fmt(i.profit)}</b></span>` : ` <span class="muted">· закупка не указана</span>`)).join('<br>')}</div>
-      ${o.delivery ? `<div class="card-sub" style="color:var(--text);line-height:1.7;">${o.delivery.mode==='delivery' ? '🚚 Доставка: '+(o.delivery.district ? o.delivery.district+', ' : '')+(o.delivery.address||'—')+' (+'+fmt(o.delivery.fee||0)+')' : '📍 Самовывоз: '+(o.delivery.point||'—')}<br>${o.delivery.asap ? '⚡ Как можно скорее' : '🕒 '+(o.delivery.date||'').split('-').reverse().slice(0,2).join('.')+' в '+(o.delivery.time||'')}</div>` : ''}
+      ${o.delivery ? `<div class="card-sub" style="color:var(--text);line-height:1.7;">${o.delivery.mode==='delivery' ? '🚚 Доставка: '+(o.delivery.district ? o.delivery.district+', ' : '')+(o.delivery.address||'—')+' (+'+fmt(o.delivery.fee||0)+')'+(o.delivery.payment_method ? '<br>💳 '+({prepay:'Предоплата',courier:'Оплата курьеру по договорённости'}[o.delivery.payment_method]||o.delivery.payment_method) : '') : '📍 Самовывоз: '+(o.delivery.point||'—')}<br>${o.delivery.asap ? '⚡ Как можно скорее' : '🕒 '+(o.delivery.date||'').split('-').reverse().slice(0,2).join('.')+' в '+(o.delivery.time||'')}</div>` : ''}
       ${o.discount ? `<div class="card-sub">Промокод: ${o.promo_code} (−${fmt(o.discount)}) · Сумма товаров: ${fmt(o.subtotal)}</div>` : ''}
       <div class="card-sub">Итого: ${fmt(o.total)}</div>
       <div class="card-sub">Общая прибыль по заказу: <b style="color:${o.profit_total < 0 ? 'var(--danger)' : 'var(--lime)'};">${fmt(o.profit_total)}</b>${o.profit_complete ? '' : ' <span class="muted">(без товаров с неуказанной закупкой)</span>'}</div>
@@ -1026,9 +1027,13 @@ function renderOrders(){
         📞 <a href="tel:${o.phone}">${o.phone}</a>${o.customer_username ? ` · <a href="https://t.me/${o.customer_username}" target="_blank" rel="noopener">@${o.customer_username}</a>` : ''}
       </div>
       ${o.comment ? `<div class="order-comment">«${o.comment}»</div>` : ''}
+      ${(o.status_history && o.status_history.length) ? `<details class="status-history" style="margin:8px 0;position:relative;z-index:1;">
+        <summary class="card-sub" style="cursor:pointer;">История статусов (${o.status_history.length})</summary>
+        <div class="card-sub" style="line-height:1.7;">${o.status_history.map(h => `${new Date(h.at).toLocaleString('ru-RU')} — <b>${statusLabel(h.status)}</b>`).join('<br>')}</div>
+      </details>` : ''}
       <div class="order-actions">
         <select class="order-status-select" data-status="${o.id}">
-          ${['new','contacted','accepted','done','rejected','cancelled'].map(s=>`<option value="${s}" ${s===o.status?'selected':''}>${statusLabel(s)}</option>`).join('')}
+          ${['new','accepted','courier','done','cancelled'].concat(['new','accepted','courier','done','cancelled'].includes(o.status) ? [] : [o.status]).map(s=>`<option value="${s}" ${s===o.status?'selected':''}>${statusLabel(s)}</option>`).join('')}
         </select>
       </div>
       ${o.customer_chat_id
@@ -1171,6 +1176,8 @@ async function sendQuestionMessage(id){
 let sales = null;
 
 let districts = null;
+const PAY_OPTS = { both:'Оба варианта', prepay:'Только предоплата', courier:'Только оплата курьеру' };
+const payOptionsHTML = cur => Object.entries(PAY_OPTS).map(([k,t]) => `<option value="${k}"${k===cur?' selected':''}>${t}</option>`).join('');
 
 function renderDistricts(){
   const list = document.getElementById('list');
@@ -1185,6 +1192,9 @@ function renderDistricts(){
         <input type="number" id="dNewFee" min="0" step="1" inputmode="decimal" placeholder="Цена, ₽" style="max-width:120px;">
         <button class="btn" id="dAddBtn">Добавить</button>
       </div>
+      <div class="msg-row" style="margin-top:8px;">
+        <select class="order-status-select" id="dNewPay" aria-label="Способ оплаты">${payOptionsHTML('both')}</select>
+      </div>
     </div>
     <div class="card-sub" style="margin:0 0 12px;">Цена района добавляется к заказу при доставке. Если районов нет совсем, действует единая цена доставки. Бесплатная доставка от суммы заказа (FREE_DELIVERY_FROM) работает как раньше.</div>
     ${districts.length ? districts.map(d => `
@@ -1193,18 +1203,21 @@ function renderDistricts(){
           <input type="text" data-f="name" value="${escR(d.name)}" maxlength="64">
           <input type="number" data-f="fee" value="${d.fee}" min="0" step="1" inputmode="decimal" style="max-width:120px;">
         </div>
+        <div class="msg-row" style="margin-top:8px;">
+          <select class="order-status-select" data-f="payment" aria-label="Способ оплаты">${payOptionsHTML(d.payment)}</select>
+        </div>
         <div class="loy-actions" style="margin-top:10px;">
           <button class="btn-outline" data-act="toggle">${d.active ? 'Скрыть от покупателей' : 'Показать покупателям'}</button>
           <button class="btn" data-act="save">Сохранить</button>
           <button class="btn-outline" data-act="del">Удалить</button>
         </div>
-        <div class="card-sub" style="margin-top:8px;">${d.active ? '🟢 Активен' : '⚪ Скрыт'}</div>
+        <div class="card-sub" style="margin-top:8px;">${d.active ? '🟢 Активен' : '⚪ Скрыт'} · 💳 ${PAY_OPTS[d.payment] || PAY_OPTS.both}</div>
       </div>`).join('') : '<div class="empty">Районов пока нет — добавьте первый.</div>'}`;
 
   document.getElementById('dAddBtn').onclick = async () => {
     try {
       await api('/api/admin/districts', { method:'POST', headers:{ 'Content-Type':'application/json' },
-        body: JSON.stringify({ name: document.getElementById('dNewName').value, fee: document.getElementById('dNewFee').value }) });
+        body: JSON.stringify({ name: document.getElementById('dNewName').value, fee: document.getElementById('dNewFee').value, payment: document.getElementById('dNewPay').value }) });
       districts = await api('/api/admin/districts');
       renderDistricts();
       showToast('Район добавлен');
@@ -1221,7 +1234,8 @@ function renderDistricts(){
       } catch(e){ showToast(e.message); }
     };
     card.querySelector('[data-act="save"]').onclick = () => put({
-      name: card.querySelector('[data-f="name"]').value, fee: card.querySelector('[data-f="fee"]').value });
+      name: card.querySelector('[data-f="name"]').value, fee: card.querySelector('[data-f="fee"]').value,
+      payment: card.querySelector('[data-f="payment"]').value });
     card.querySelector('[data-act="toggle"]').onclick = () => put({ active: !districts.find(x => x.id === id).active });
     card.querySelector('[data-act="del"]').onclick = async () => {
       if (!confirm('Удалить район? В уже оформленных заказах он сохранится.')) return;
