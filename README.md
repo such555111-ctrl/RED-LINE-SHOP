@@ -10,7 +10,7 @@ main.py           — Flask-сервер (все данные — в Neon): ми
 index.html        — интерфейс мини-приложения (18+ гейт, hero, каталог, корзина, заказ)
 admin.html        — админ-панель (товары, заказы, вопросы, отзывы, промокоды, баллы покупателей)
 products.json     — каталог магазина (82 позиции из прайса канала)
-brand/            — hero.svg (арт для шапки), emblem.svg (эмблема), avatar-channel.jpg (аватарка 640×640); отдаются по /brand/<файл>
+brand/            — avatar-channel.jpg (аватарка канала 640×640, для /setuserpic в @BotFather). На сайте аватарка встроена прямо в index.html и admin.html (base64), внешние файлы не нужны
 requirements.txt, Procfile, render.yaml — запуск на Render
 ```
 
@@ -26,8 +26,8 @@ requirements.txt, Procfile, render.yaml — запуск на Render
 | Шрифты | Oswald (заголовки, кнопки, цены), Kaushan Script (логотип «Red line shop», слово «оригинал»), Manrope (интерфейс и текст) |
 
 Цвета и шрифты — переменные в блоке «RED LINE SHOP · дизайн» в конце `<style>` в `index.html` и `admin.html`.
-Логотип — текст `.logo-txt` (красное «Red line» + белое «shop»). Картинки: `brand/hero.svg` (шапка), `brand/emblem.svg` (возрастной гейт),
-`brand/avatar-channel.jpg` — аватарка канала (для `/setuserpic` в @BotFather).
+Логотип — текст `.logo-txt` (красное «Red line» + белое «shop»). Аватарка встроена в `index.html` / `admin.html` (переменная `--rl-avatar` в блоке «аватарка (встроена в файл)»): шапка, hero, возрастной гейт, подвал, иконка вкладки.
+`brand/avatar-channel.jpg` — оригинал аватарки (для `/setuserpic` в @BotFather).
 
 ## Запуск (Render)
 1. @BotFather → `/newbot`, затем `/setuserpic` → аватар магазина (логотип Red Line Shop).
