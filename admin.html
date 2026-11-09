@@ -289,13 +289,15 @@
     transition:all .3s var(--ease);
   }
 
-  .tabs{display:flex;gap:4px;margin:0 0 18px;background:var(--bg-elev);border:1.5px solid var(--line);border-radius:999px;padding:4px;}
+  .tabs{display:flex;flex-wrap:wrap;gap:4px;margin:0 0 18px;background:var(--bg-elev);border:1.5px solid var(--line);border-radius:24px;padding:4px;}
   .tab-btn{
-    flex:1;background:transparent;border:none;color:var(--muted);
-    padding:10px 4px;font-family:var(--font-body);font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;white-space:nowrap;
+    flex:1 1 auto;background:transparent;border:none;color:var(--muted);
+    padding:10px 4px;font-family:var(--font-body);font-size:10px;letter-spacing:.03em;text-transform:uppercase;white-space:nowrap;
     border-radius:999px;cursor:pointer;position:relative;
     transition:all .2s var(--ease);font-weight:500;
   }
+  .tabs-break{flex:0 0 100%;height:0;}
+  @media (max-width:380px){ .tab-btn{font-size:9px;letter-spacing:.01em;padding:10px 2px;} .tabs{gap:2px;} }
   .tab-btn:active{transform:scale(.95);}
   .tab-btn.active{color:var(--on-grad);background:var(--grad);box-shadow:0 4px 16px rgba(230,36,48,.3);font-weight:600;}
   .tab-badge{
@@ -551,6 +553,7 @@
     <button class="tab-btn" data-tab="questions">Вопросы<span class="tab-badge" id="questionsBadge" style="display:none;"></span></button>
     <button class="tab-btn" data-tab="reviews">Отзывы<span class="tab-badge" id="reviewsBadge" style="display:none;"></span></button>
     <button class="tab-btn" data-tab="promos">Промокоды</button>
+    <span class="tabs-break"></span>
     <button class="tab-btn" data-tab="loyalty">Баллы</button>
     <button class="tab-btn" data-tab="sales">Продажи товаров</button>
     <button class="tab-btn" data-tab="top">Топ товаров</button>
