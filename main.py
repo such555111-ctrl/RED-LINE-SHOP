@@ -7,7 +7,7 @@ import functools
 import re
 import io
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, request, send_from_directory, abort, jsonify, Response
 import telebot
@@ -64,11 +64,12 @@ except ValueError:
     FREE_DELIVERY_FROM = 990
 
 
-def delivery_fee_for(goods_total):
-    """Стоимость доставки: 0 ₽ от FREE_DELIVERY_FROM, иначе DELIVERY_FEE."""
+def delivery_fee_for(goods_total, base_fee=None):
+    """Стоимость доставки: 0 ₽ от FREE_DELIVERY_FROM, иначе цена района (base_fee) или DELIVERY_FEE,
+    если районы не настроены."""
     if FREE_DELIVERY_FROM > 0 and goods_total >= FREE_DELIVERY_FROM:
         return 0
-    return DELIVERY_FEE
+    return DELIVERY_FEE if base_fee is None else base_fee
 
 
 PICKUP_POINTS = [
@@ -169,6 +170,11 @@ class Order(_DocMixin, Base):
 
 class Question(_DocMixin, Base):
     __tablename__ = "questions"
+
+
+class District(_DocMixin, Base):
+    """Районы доставки и их цена. Хранятся в базе (таблица districts), создаётся автоматически."""
+    __tablename__ = "districts"
 
 
 class Promo(_DocMixin, Base):
@@ -689,6 +695,14 @@ def save_questions(items):
     _save_docs(Question, items)
 
 
+def load_districts():
+    return _load_docs(District)
+
+
+def save_districts(items):
+    _save_docs(District, items)
+
+
 def load_promos():
     return _load_docs(Promo)
 
@@ -827,6 +841,91 @@ def sanitize_old_price(raw):
     except (TypeError, ValueError):
         return None
     return v if v > 0 else None
+
+
+def sanitize_cost_price(raw):
+    """Закупочная цена: число >= 0 (до 2 знаков) либо None, если не задана/некорректна."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()) or isinstance(raw, bool):
+        return None
+    try:
+        v = round(float(str(raw).replace(",", ".").replace(" ", "")), 2)
+    except (TypeError, ValueError):
+        return None
+    if v != v or v < 0 or v > 100_000_000:      # NaN / отрицательные / абсурдные значения
+        return None
+    return int(v) if v.is_integer() else v
+
+
+def sanitize_fee(raw):
+    """Цена доставки района: число >= 0 (до 2 знаков) либо None, если некорректна."""
+    v = sanitize_cost_price(raw)
+    return v if v is not None and v <= 100_000 else None
+
+
+def _num(v):
+    return int(v) if float(v).is_integer() else round(float(v), 2)
+
+
+def public_product(p):
+    """Товар для витрины: закупочная цена и прибыль покупателям не показываются."""
+    return {k: v for k, v in p.items() if k not in ("cost_price", "unit_profit")}
+
+
+def admin_product(p):
+    """Товар для админ-панели: + прибыль с единицы (цена продажи − закупочная)."""
+    d = dict(p)
+    cost = sanitize_cost_price(p.get("cost_price"))
+    d["cost_price"] = cost
+    d["unit_profit"] = _num(float(p.get("price") or 0) - cost) if cost is not None else None
+    return d
+
+
+def public_order(o):
+    """Заказ для покупателя: без закупочных цен и прибыли."""
+    d = {k: v for k, v in o.items() if k not in ("profit_total", "profit_complete")}
+    d["items"] = [{k: v for k, v in i.items() if k not in ("cost_price", "unit_profit", "profit")}
+                  if isinstance(i, dict) else i for i in (o.get("items") or [])]
+    return d
+
+
+def admin_order(o, cost_by_id=None):
+    """Заказ для админ-панели: прибыль по каждой позиции и общая прибыль заказа.
+    Прибыль позиции = (цена продажи − закупочная) × количество. Закупочная берётся из снимка в заказе,
+    а для старых заказов (без снимка) — из текущей карточки товара. Данные в базу не пишутся."""
+    if cost_by_id is None:
+        cost_by_id = {p.get("id"): sanitize_cost_price(p.get("cost_price")) for p in load_products()}
+    d = dict(o)
+    items, total, complete = [], 0.0, True
+    for i in (o.get("items") or []):
+        if not isinstance(i, dict):
+            items.append(i)
+            continue
+        it = dict(i)
+        cost = sanitize_cost_price(it.get("cost_price"))
+        if cost is None:
+            try:
+                cost = cost_by_id.get(int(it.get("id")))
+            except (TypeError, ValueError):
+                cost = None
+        try:
+            price = float(it.get("price") or 0)
+            qty = int(it.get("qty") or 1)
+        except (TypeError, ValueError):
+            price, qty = 0.0, 1
+        it["cost_price"] = cost
+        if cost is None:
+            it["unit_profit"] = None
+            it["profit"] = None
+            complete = False
+        else:
+            it["unit_profit"] = _num(price - cost)
+            it["profit"] = _num((price - cost) * qty)
+            total += (price - cost) * qty
+        items.append(it)
+    d["items"] = items
+    d["profit_total"] = _num(round(total, 2))
+    d["profit_complete"] = complete        # False — у части товаров закупочная цена не задана
+    return d
 
 
 # --- Промокоды -----------------------------------------------------------
@@ -1108,6 +1207,15 @@ def public_config():
                     "point_value": POINT_VALUE})
 
 
+@app.route("/api/districts", methods=["GET"])
+def public_districts():
+    """Активные районы доставки с ценами (для выбора при оформлении заказа)."""
+    items = [x for x in load_districts() if x.get("active", True)]
+    resp = jsonify([{"id": x["id"], "name": x.get("name"), "fee": x.get("fee") or 0} for x in items])
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 @app.route("/api/loyalty/balance", methods=["GET"])
 def loyalty_balance():
     """Баланс баллов покупателя. Нет записи — создаём с балансом 0."""
@@ -1157,7 +1265,7 @@ def order_loyalty_args(o):
 @app.route("/products.json", methods=["GET"])
 def products():
     # каталог берётся из базы; короткий кэш, чтобы не дёргать Neon на каждое открытие
-    resp = jsonify(load_products())
+    resp = jsonify([public_product(p) for p in load_products()])
     resp.headers["Cache-Control"] = "public, max-age=30"
     return resp
 
@@ -1169,7 +1277,8 @@ def parse_delivery(raw):
     if mode not in ("pickup", "delivery"):
         return None, "Выберите самовывоз или доставку"
 
-    d = {"mode": mode, "point": None, "address": None, "asap": True, "date": None, "time": None, "fee": 0}
+    d = {"mode": mode, "point": None, "address": None, "asap": True, "date": None, "time": None, "fee": 0,
+         "district_id": None, "district": None, "district_fee": None}
     if mode == "pickup":
         point = (raw.get("point") or "").strip()
         if point not in PICKUP_POINTS:
@@ -1181,6 +1290,20 @@ def parse_delivery(raw):
             return None, "Укажите адрес доставки"
         d["address"] = address[:300]
         d["fee"] = DELIVERY_FEE
+        # район и его цена берутся из базы (присланным клиентом ценам не верим)
+        districts = [x for x in load_districts() if x.get("active", True)]
+        if districts:
+            try:
+                did = int(raw.get("district_id"))
+            except (TypeError, ValueError):
+                return None, "Выберите район доставки"
+            dist = next((x for x in districts if x.get("id") == did), None)
+            if dist is None:
+                return None, "Выбранный район недоступен — выберите другой"
+            d["district_id"] = dist["id"]
+            d["district"] = dist.get("name")
+            d["district_fee"] = sanitize_fee(dist.get("fee")) or 0
+            d["fee"] = d["district_fee"]
 
     if not raw.get("asap", True):
         date_s = (raw.get("date") or "").strip()
@@ -1201,7 +1324,8 @@ def delivery_text(d):
         return ""
     if d.get("mode") == "delivery":
         fee_txt = fmt_price(d["fee"]) if d.get("fee") else "бесплатно"
-        line = f"🚚 Доставка ({fee_txt}): {d.get('address') or '—'}"
+        line = (f"🚚 Доставка ({fee_txt}): "
+                + (f"{d['district']}, " if d.get("district") else "") + f"{d.get('address') or '—'}")
     else:
         line = f"📍 Самовывоз: {d.get('point') or '—'}"
     if d.get("asap", True):
@@ -1241,6 +1365,17 @@ def create_order():
     if delivery_err:
         abort(400, description=delivery_err)
 
+    # цены берём из базы, а не из запроса: итог заказа считается только на сервере
+    _products_by_id = {p.get("id"): p for p in load_products()}
+    for it in items:
+        try:
+            _p = _products_by_id.get(int(it.get("id")))
+        except (TypeError, ValueError):
+            _p = None
+        if _p is None:
+            abort(400, description=f"Товар «{it.get('name') or '—'}» больше не продаётся — обновите каталог")
+        it["price"] = int(_p.get("price") or 0)
+
     subtotal = sum(int(i.get("price") or 0) * int(i.get("qty") or 1) for i in items)
 
     tg_user = data.get("tg_user") or {}
@@ -1263,7 +1398,7 @@ def create_order():
     # --- баллы: проверяем до любых списаний ---
     goods_total = subtotal - discount                       # сумма корзины с учётом промокода
     if delivery["mode"] == "delivery":
-        delivery["fee"] = delivery_fee_for(goods_total)     # бесплатно от FREE_DELIVERY_FROM
+        delivery["fee"] = delivery_fee_for(goods_total, delivery.get("district_fee"))   # цена района; бесплатно от FREE_DELIVERY_FROM
     points_to_spend = parse_points(data.get("points_to_spend"))
     if points_to_spend:
         if not customer_chat_id:
@@ -1299,6 +1434,14 @@ def create_order():
         except Exception:
             log.exception("Не удалось обновить баланс баллов")
             return jsonify({"error": "Не удалось списать баллы, попробуйте ещё раз"}), 500
+
+    # снимок закупочной цены на момент заказа (для расчёта прибыли; клиентские значения игнорируем)
+    _cost_by_id = {p.get("id"): sanitize_cost_price(p.get("cost_price")) for p in load_products()}
+    for it in items:
+        try:
+            it["cost_price"] = _cost_by_id.get(int(it.get("id")))
+        except (TypeError, ValueError):
+            it["cost_price"] = None
 
     orders = load_orders()
     new_id = (max([o.get("id", 0) for o in orders], default=0) + 1)
@@ -1408,7 +1551,8 @@ def create_order():
             log.warning("Не удалось уведомить администратора %s: %s", admin_id, e)
 
     return jsonify({"ok": True, "order_id": new_id, "total": total, "points_spent": points_to_spend,
-                    "points_discount": points_discount, "cashback": cashback, "points_balance": new_balance}), 201
+                    "points_discount": points_discount, "cashback": cashback, "points_balance": new_balance,
+                    "delivery_fee": delivery["fee"], "district": delivery.get("district")}), 201
 
 
 @app.route("/api/promo/check", methods=["POST"])
@@ -1454,7 +1598,7 @@ def customer_orders():
     orders = load_orders()
     mine = [o for o in orders if o.get("customer_chat_id") == tg_id]
     mine.sort(key=lambda o: o.get("id", 0), reverse=True)
-    return jsonify(mine)
+    return jsonify([public_order(o) for o in mine])
 
 
 @app.route("/api/orders/<int:oid>/cancel", methods=["POST"])
@@ -1487,7 +1631,7 @@ def customer_cancel_order(oid):
         except Exception as e:
             log.warning("Не удалось уведомить администратора %s: %s", admin_id, e)
 
-    return jsonify(order)
+    return jsonify(public_order(order))
 
 
 @app.route("/api/question", methods=["POST"])
@@ -1596,7 +1740,7 @@ def admin_login():
 @app.route("/api/admin/products", methods=["GET"])
 def admin_get_products():
     require_admin()
-    return jsonify(load_products())
+    return jsonify([admin_product(p) for p in load_products()])
 
 
 @app.route("/api/admin/products", methods=["POST"])
@@ -1627,10 +1771,11 @@ def admin_create_product():
         "images": images,
         "image": images[0] if images else None,
         "stock": sanitize_stock(data.get("stock")),
+        "cost_price": sanitize_cost_price(data.get("cost_price")),
     }
     items.append(product)
     save_products(items)
-    return jsonify(product), 201
+    return jsonify(admin_product(product)), 201
 
 
 @app.route("/api/admin/products/<int:pid>", methods=["PUT"])
@@ -1654,6 +1799,8 @@ def admin_update_product(pid):
                     pass
             if "old_price" in data:
                 p["old_price"] = sanitize_old_price(data.get("old_price"))
+            if "cost_price" in data:
+                p["cost_price"] = sanitize_cost_price(data.get("cost_price"))
             if "badge" in data:
                 p["badge"] = sanitize_badge(data.get("badge"))
             if "sizes" in data:
@@ -1676,7 +1823,7 @@ def admin_update_product(pid):
                 p["image"] = images[0] if images else None
             save_products(items)
             purge_unused_images(set(old_imgs) - set(p.get("images") or []))
-            return jsonify(p)
+            return jsonify(admin_product(p))
     abort(404, description="Товар не найден")
 
 
@@ -1826,7 +1973,230 @@ def admin_get_orders():
     require_admin()
     orders = load_orders()
     orders.sort(key=lambda o: o.get("id", 0), reverse=True)
-    return jsonify(orders)
+    cost_by_id = {p.get("id"): sanitize_cost_price(p.get("cost_price")) for p in load_products()}
+    return jsonify([admin_order(o, cost_by_id) for o in orders])
+
+
+# --- Топ товаров по периодам --------------------------------------------
+
+try:
+    from zoneinfo import ZoneInfo
+    SHOP_TZ = ZoneInfo(os.environ.get("SHOP_TIMEZONE") or "Europe/Moscow")   # границы «сегодня/месяца»
+except Exception:
+    SHOP_TZ = timezone.utc
+
+TOP_LIMIT = 10
+
+
+def _order_dt(o):
+    try:
+        dt = datetime.fromisoformat(str(o.get("created_at")))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(SHOP_TZ)
+
+
+def _top_products(orders, cost_by_id, names_by_id):
+    """Топ товаров по продажам для списка заказов: штуки, выручка, прибыль."""
+    stats = {}
+    for raw in orders:
+        o = admin_order(raw, cost_by_id)
+        for i in o.get("items") or []:
+            if not isinstance(i, dict):
+                continue
+            try:
+                pid = int(i.get("id"))
+            except (TypeError, ValueError):
+                pid = None
+            try:
+                qty = int(i.get("qty") or 1)
+                price = float(i.get("price") or 0)
+            except (TypeError, ValueError):
+                continue
+            st = stats.setdefault(pid if pid is not None else ("name", i.get("name")), {
+                "product_id": pid, "name": names_by_id.get(pid) or i.get("name") or "—",
+                "units": 0, "revenue": 0.0, "profit": 0.0, "profit_complete": True})
+            st["units"] += qty
+            st["revenue"] += price * qty
+            if i.get("profit") is None:
+                st["profit_complete"] = False
+            else:
+                st["profit"] += i["profit"]
+    top = sorted(stats.values(), key=lambda s: (-s["units"], -s["revenue"], str(s["name"])))[:TOP_LIMIT]
+    for n, st in enumerate(top, 1):
+        st["rank"] = n
+        st["revenue"] = _num(round(st["revenue"], 2))
+        st["profit"] = _num(round(st["profit"], 2))
+    return top
+
+
+@app.route("/api/admin/top-products", methods=["GET"])
+def admin_top_products():
+    """Топ товаров за сегодня / 7 дней / текущий месяц / всё время (только администратор).
+    Учитываются только подтверждённые заказы (принят, выполнен); отменённые и необработанные — нет."""
+    require_admin()
+    products = load_products()
+    cost_by_id = {p.get("id"): sanitize_cost_price(p.get("cost_price")) for p in products}
+    names_by_id = {p.get("id"): p.get("name") for p in products}
+
+    now = datetime.now(SHOP_TZ)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    starts = {
+        "today": today,
+        "week": today - timedelta(days=6),          # сегодня и 6 предыдущих дней
+        "month": today.replace(day=1),
+        "all": None,
+    }
+    confirmed = []
+    for o in load_orders():
+        if o.get("status") in ACCEPTED_STATUSES:
+            confirmed.append((o, _order_dt(o)))
+
+    result = {}
+    for key, start in starts.items():
+        chosen = [o for o, dt in confirmed if start is None or (dt is not None and dt >= start)]
+        result[key] = {"orders": len(chosen), "products": _top_products(chosen, cost_by_id, names_by_id)}
+    return jsonify(result)
+
+
+# --- Районы доставки (админка) -------------------------------------------
+
+def _district_name(raw):
+    return " ".join(str(raw or "").split())[:64]
+
+
+def _district_dup(items, name, skip_id=None):
+    return any(x.get("id") != skip_id and str(x.get("name", "")).casefold() == name.casefold() for x in items)
+
+
+@app.route("/api/admin/districts", methods=["GET"])
+def admin_get_districts():
+    require_admin()
+    return jsonify(load_districts())
+
+
+@app.route("/api/admin/districts", methods=["POST"])
+@locked
+def admin_create_district():
+    require_admin()
+    data = request.get_json(force=True, silent=True) or {}
+    name = _district_name(data.get("name"))
+    if not name:
+        abort(400, description="Укажите название района")
+    fee = sanitize_fee(data.get("fee"))
+    if fee is None:
+        abort(400, description="Укажите цену доставки (число от 0)")
+    items = load_districts()
+    if _district_dup(items, name):
+        abort(400, description="Район с таким названием уже есть")
+    district = {"id": max([x.get("id", 0) for x in items], default=0) + 1,
+                "name": name, "fee": fee, "active": bool(data.get("active", True))}
+    items.append(district)
+    save_districts(items)
+    return jsonify(district), 201
+
+
+@app.route("/api/admin/districts/<int:did>", methods=["PUT"])
+@locked
+def admin_update_district(did):
+    require_admin()
+    data = request.get_json(force=True, silent=True) or {}
+    items = load_districts()
+    for x in items:
+        if x.get("id") == did:
+            if "name" in data:
+                name = _district_name(data.get("name"))
+                if not name:
+                    abort(400, description="Укажите название района")
+                if _district_dup(items, name, skip_id=did):
+                    abort(400, description="Район с таким названием уже есть")
+                x["name"] = name
+            if "fee" in data:
+                fee = sanitize_fee(data.get("fee"))
+                if fee is None:
+                    abort(400, description="Укажите цену доставки (число от 0)")
+                x["fee"] = fee
+            if "active" in data:
+                x["active"] = bool(data.get("active"))
+            save_districts(items)
+            return jsonify(x)
+    abort(404, description="Район не найден")
+
+
+@app.route("/api/admin/districts/<int:did>", methods=["DELETE"])
+@locked
+def admin_delete_district(did):
+    require_admin()
+    items = load_districts()
+    new_items = [x for x in items if x.get("id") != did]
+    if len(new_items) == len(items):
+        abort(404, description="Район не найден")
+    save_districts(new_items)      # в старых заказах район и цена остаются как были
+    return jsonify({"ok": True})
+
+
+@app.route("/api/admin/sales", methods=["GET"])
+def admin_sales():
+    """Статистика продаж товаров (только администратор). Отменённые и отклонённые заказы не учитываются.
+    Выручка = сумма (цена × количество) по позициям; прибыль = выручка − закупка (по позициям, где закупка задана)."""
+    require_admin()
+    products_by_id = {p.get("id"): p for p in load_products()}
+    cost_by_id = {pid: sanitize_cost_price(p.get("cost_price")) for pid, p in products_by_id.items()}
+    stats = {}
+    orders_count = units = 0
+    revenue = profit = 0.0
+    profit_complete = True
+    for raw in load_orders():
+        if raw.get("status") in CANCEL_STATUSES:
+            continue
+        o = admin_order(raw, cost_by_id)
+        orders_count += 1
+        for i in o.get("items") or []:
+            if not isinstance(i, dict):
+                continue
+            try:
+                pid = int(i.get("id"))
+            except (TypeError, ValueError):
+                pid = None
+            try:
+                qty = int(i.get("qty") or 1)
+                price = float(i.get("price") or 0)
+            except (TypeError, ValueError):
+                continue
+            key = pid if pid is not None else ("name", i.get("name"))
+            st = stats.setdefault(key, {
+                "product_id": pid,
+                "name": (products_by_id.get(pid) or {}).get("name") or i.get("name") or "—",
+                "category": (products_by_id.get(pid) or {}).get("category") or "",
+                "units": 0, "orders": set(), "revenue": 0.0, "profit": 0.0, "profit_complete": True,
+            })
+            st["units"] += qty
+            st["orders"].add(o.get("id"))
+            st["revenue"] += price * qty
+            units += qty
+            revenue += price * qty
+            if i.get("profit") is None:
+                st["profit_complete"] = False
+                profit_complete = False
+            else:
+                st["profit"] += i["profit"]
+                profit += i["profit"]
+    ranking = sorted(stats.values(), key=lambda s: (-s["units"], -s["revenue"], str(s["name"])))
+    for n, st in enumerate(ranking, 1):
+        st["rank"] = n
+        st["orders"] = len(st["orders"])
+        st["revenue"] = _num(round(st["revenue"], 2))
+        st["profit"] = _num(round(st["profit"], 2))
+    return jsonify({
+        "orders": orders_count,
+        "units": units,
+        "revenue": _num(round(revenue, 2)),
+        "profit": _num(round(profit, 2)),
+        "profit_complete": profit_complete,     # False — у части проданных товаров не задана закупочная цена
+        "products": ranking,
+    })
 
 
 @app.route("/api/admin/orders/<int:oid>/status", methods=["PUT"])
@@ -1844,7 +2214,7 @@ def admin_update_order_status(oid):
             if err:
                 abort(400, description=err)
             save_orders(orders)
-            return jsonify(o)
+            return jsonify(admin_order(o))
     abort(404, description="Заказ не найден")
 
 
@@ -1881,7 +2251,7 @@ def admin_message_customer(oid):
     if order.get("status") == "new":
         order["status"] = "contacted"
     save_orders(orders)
-    return jsonify(order)
+    return jsonify(admin_order(order))
 
 
 # --- Управление баллами покупателей (админка) -----------------------------

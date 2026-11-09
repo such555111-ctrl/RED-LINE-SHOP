@@ -1540,6 +1540,10 @@
       <div class="sizes" id="coPoints" style="margin-bottom:6px;"></div>
     </div>
     <div class="co-box" id="coDeliveryBox" style="display:none;">
+      <div id="coDistrictWrap" style="display:none;">
+        <div class="label" style="margin-top:14px;">Район доставки</div>
+        <select id="coDistrict" class="text-input"></select>
+      </div>
       <div class="label" style="margin-top:14px;">Адрес доставки</div>
       <textarea id="coAddress" class="text-input" style="min-height:64px;" placeholder="Улица, дом, подъезд, этаж, квартира"></textarea>
       <div id="coFreeHint" style="display:none;margin-top:8px;font-size:12.5px;font-weight:600;color:var(--accent-soft);"></div>
@@ -1649,7 +1653,14 @@ const SWATCHES = [
 ];
 let DELIVERY_FEE = 59;
 let FREE_DELIVERY_FROM = 990; // бесплатная доставка от этой суммы товаров (после промокода); 0 — отключено
-function deliveryFeeFor(goods){ return (FREE_DELIVERY_FROM > 0 && goods >= FREE_DELIVERY_FROM) ? 0 : DELIVERY_FEE; }
+var DISTRICTS = [];           // районы доставки с ценами (с сервера); пусто — действует единая цена DELIVERY_FEE
+function districtById(id){ return DISTRICTS.find(d => d.id === id) || null; }
+function baseDeliveryFee(){
+  if (!DISTRICTS.length) return DELIVERY_FEE;
+  const d = districtById(coState.district);
+  return d ? d.fee : 0;
+}
+function deliveryFeeFor(goods){ return (FREE_DELIVERY_FROM > 0 && goods >= FREE_DELIVERY_FROM) ? 0 : baseDeliveryFee(); }
 let PICKUP_POINTS = ['Кызыл (личная доставка)'];
 let SHOP_CONTACT = 'Red_line_ST_mr'; // Telegram-аккаунт менеджера (без @); сервер может переопределить через SHOP_CONTACT
 const fmt = n => (Number.isInteger(n) ? n.toLocaleString('ru-RU')
@@ -2697,7 +2708,7 @@ document.getElementById('qSubmitBtn').onclick = submitQuestion;
 
 
 // --- Оформление: самовывоз / доставка / время ---
-var coState = { mode:'pickup', point:null, when:'asap' };
+var coState = { mode:'pickup', point:null, when:'asap', district:null };
 
 function pad2(n){ return String(n).padStart(2,'0'); }
 function todayStr(){ const d = new Date(); return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`; }
@@ -2718,12 +2729,15 @@ function updateCheckoutSummary(){
   document.getElementById('coSumGoods').textContent = fmt(s.subtotal - s.discount);
   const isDlv = coState.mode === 'delivery';
   document.getElementById('coSumDlvRow').style.display = isDlv ? 'flex' : 'none';
-  document.getElementById('coSumDlv').textContent = s.fee ? fmt(s.fee) : 'бесплатно';
+  const needDistrict = DISTRICTS.length > 0 && !districtById(coState.district);
+  document.getElementById('coSumDlv').textContent = needDistrict ? 'выберите район' : (s.fee ? fmt(s.fee) : 'бесплатно');
   const goodsSum = s.subtotal - s.discount;
-  document.getElementById('coFeeLabel').textContent = isDlv && !s.fee ? 'бесплатно' : (DELIVERY_FEE ? '+' + fmt(DELIVERY_FEE) : 'бесплатно');
+  const baseFee = baseDeliveryFee();
+  document.getElementById('coFeeLabel').textContent = needDistrict ? 'по району'
+    : (isDlv && !s.fee ? 'бесплатно' : (baseFee ? '+' + fmt(baseFee) : 'бесплатно'));
   const hint = document.getElementById('coFreeHint');
   if (hint){
-    if (isDlv && FREE_DELIVERY_FROM > 0){
+    if (isDlv && FREE_DELIVERY_FROM > 0 && !needDistrict){
       hint.style.display = '';
       hint.textContent = s.fee ? '✓ Бесплатная доставка — заказ от ' + fmt(FREE_DELIVERY_FROM)
                                : 'Добавьте товаров ещё на ' + fmt(FREE_DELIVERY_FROM - goodsSum) + ' — и доставка будет бесплатной';
@@ -2741,6 +2755,14 @@ function renderCheckoutOpts(){
   const box = document.getElementById('coPoints');
   box.innerHTML = PICKUP_POINTS.map(p => `<button type="button" class="size-btn ${p===coState.point?'active':''}" data-point="${p}">${p}</button>`).join('');
   box.querySelectorAll('.size-btn').forEach(b => b.onclick = () => { coState.point = b.dataset.point; renderCheckoutOpts(); });
+  // район: виден только при доставке (весь блок скрыт при самовывозе)
+  if (coState.district !== null && !districtById(coState.district)) coState.district = null;
+  const dWrap = document.getElementById('coDistrictWrap');
+  dWrap.style.display = DISTRICTS.length ? '' : 'none';
+  const dSel = document.getElementById('coDistrict');
+  dSel.innerHTML = '<option value="">Выберите район…</option>' + DISTRICTS.map(d =>
+    `<option value="${d.id}">${escHtml(d.name)} — ${d.fee ? fmt(d.fee) : 'бесплатно'}</option>`).join('');
+  dSel.value = coState.district === null ? '' : String(coState.district);
   document.getElementById('coPickupBox').style.display = coState.mode === 'pickup' ? '' : 'none';
   document.getElementById('coDeliveryBox').style.display = coState.mode === 'delivery' ? '' : 'none';
   document.getElementById('coTimeBox').style.display = coState.when === 'time' ? '' : 'none';
@@ -2751,13 +2773,23 @@ function renderCheckoutOpts(){
   if (!dateEl.value) dateEl.value = todayStr();
   updateCheckoutSummary();
 }
+document.getElementById('coDistrict').onchange = e => {
+  coState.district = e.target.value ? Number(e.target.value) : null;
+  updateCheckoutSummary();
+};
+function loadDistricts(){
+  return fetch('/api/districts', { cache:'no-store' }).then(r => r.ok ? r.json() : null).then(list => {
+    if (Array.isArray(list)){ DISTRICTS = list; renderCheckoutOpts(); }
+  }).catch(() => {});
+}
+loadDistricts();
 document.querySelectorAll('#coMode .seg-btn').forEach(b => b.onclick = () => { coState.mode = b.dataset.mode; renderCheckoutOpts(); });
 document.querySelectorAll('#coWhen .seg-btn').forEach(b => b.onclick = () => { coState.when = b.dataset.when; renderCheckoutOpts(); });
 renderCheckoutOpts();
 
 function deliveryLine(d){
   if (!d) return '';
-  const place = d.mode === 'delivery' ? `🚚 Доставка: ${d.address||'—'}` : `📍 Самовывоз: ${d.point||'—'}`;
+  const place = d.mode === 'delivery' ? `🚚 Доставка: ${d.district ? escHtml(d.district) + ', ' : ''}${d.address||'—'}` : `📍 Самовывоз: ${d.point||'—'}`;
   let when = '⚡ Как можно скорее';
   if (!d.asap && d.date){
     const [y,m,dd] = d.date.split('-');
@@ -2770,6 +2802,7 @@ document.getElementById('checkoutBtn').onclick = () => {
   if (cart.length===0) return;
   document.getElementById('coError').textContent = '';
   renderCheckoutOpts();
+  loadDistricts();         // актуальные районы и цены
   openSheet('checkoutSheet');
 };
 
@@ -2798,12 +2831,15 @@ async function submitOrder(){
   const addrEl = document.getElementById('coAddress');
   const dateEl = document.getElementById('coDate');
   const timeEl = document.getElementById('coTime');
-  [addrEl, dateEl, timeEl].forEach(e => e.classList.remove('err'));
+  [addrEl, dateEl, timeEl, document.getElementById('coDistrict')].forEach(e => e.classList.remove('err'));
   const fail = (msg, el) => {
     errEl.textContent = msg;
     if (el) el.classList.add('err');
     if (tg) tg.HapticFeedback?.notificationOccurred('error');
   };
+  if (coState.mode === 'delivery' && DISTRICTS.length && !districtById(coState.district)){
+    return fail('Выберите район доставки', document.getElementById('coDistrict'));
+  }
   if (coState.mode === 'delivery' && addrEl.value.trim().length < 5){
     return fail('Укажите адрес доставки', addrEl);
   }
@@ -2827,6 +2863,7 @@ async function submitOrder(){
       mode: coState.mode,
       point: coState.mode === 'pickup' ? coState.point : null,
       address: coState.mode === 'delivery' ? addrEl.value.trim() : null,
+      district_id: coState.mode === 'delivery' ? coState.district : null,
       asap: coState.when === 'asap',
       date: coState.when === 'time' ? dateEl.value : null,
       time: coState.when === 'time' ? timeEl.value : null,

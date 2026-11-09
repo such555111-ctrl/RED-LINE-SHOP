@@ -552,6 +552,9 @@
     <button class="tab-btn" data-tab="reviews">Отзывы<span class="tab-badge" id="reviewsBadge" style="display:none;"></span></button>
     <button class="tab-btn" data-tab="promos">Промокоды</button>
     <button class="tab-btn" data-tab="loyalty">Баллы</button>
+    <button class="tab-btn" data-tab="sales">Продажи товаров</button>
+    <button class="tab-btn" data-tab="top">Топ товаров</button>
+    <button class="tab-btn" data-tab="districts">Районы</button>
   </div>
   <div class="muted" id="countLabel"></div>
   <div id="list" style="margin-top:16px;"></div>
@@ -589,6 +592,10 @@
         <input type="number" id="fPrice" placeholder="1750">
       </div>
     </div>
+
+    <label>Закупочная цена, ₽ <span class="muted" style="text-transform:none;letter-spacing:0;">— видна только в админ-панели, покупателям не показывается</span></label>
+    <input type="number" id="fCostPrice" min="0" step="0.01" inputmode="decimal" placeholder="1200">
+    <div class="muted" id="fProfitHint" style="margin:-4px 0 10px;font-size:12px;"></div>
 
     <label>Старая цена, ₽ <span class="muted" style="text-transform:none;letter-spacing:0;">— необязательно, покажется зачёркнутой рядом с новой ценой</span></label>
     <input type="number" id="fOldPrice" placeholder="2100">
@@ -819,7 +826,7 @@ async function enterApp(){
   await loadPromos();
 }
 
-const TAB_TITLES = { products:'Товары', orders:'Заказы', questions:'Вопросы', reviews:'Отзывы', promos:'Промокоды', loyalty:'Баллы покупателей' };
+const TAB_TITLES = { products:'Товары', orders:'Заказы', questions:'Вопросы', reviews:'Отзывы', promos:'Промокоды', loyalty:'Баллы покупателей', sales:'Продажи товаров', top:'Топ товаров', districts:'Районы доставки' };
 
 document.querySelectorAll('.tab-btn').forEach(btn=>{
   btn.onclick = async () => {
@@ -840,6 +847,18 @@ document.querySelectorAll('.tab-btn').forEach(btn=>{
     } else if (currentTab === 'reviews'){
       await loadReviews();
       renderReviews();
+    } else if (currentTab === 'districts'){
+      document.getElementById('list').innerHTML = '<div class="empty">Загрузка…</div>';
+      try { districts = await api('/api/admin/districts'); } catch(e){ showToast(e.message); districts = null; }
+      if (currentTab === 'districts') renderDistricts();
+    } else if (currentTab === 'top'){
+      document.getElementById('list').innerHTML = '<div class="empty">Загрузка…</div>';
+      try { topData = await api('/api/admin/top-products'); } catch(e){ showToast(e.message); topData = null; }
+      if (currentTab === 'top') renderTop();
+    } else if (currentTab === 'sales'){
+      document.getElementById('list').innerHTML = '<div class="empty">Загрузка…</div>';
+      try { sales = await api('/api/admin/sales'); } catch(e){ showToast(e.message); sales = null; }
+      if (currentTab === 'sales') renderSales();
     } else if (currentTab === 'loyalty'){
       try { await loadLoyalty(); } catch(e){ showToast(e.message); }
       if (currentTab === 'loyalty') renderLoyalty();
@@ -884,6 +903,7 @@ function renderList(){
       <div class="card-body">
         <div class="card-title">${p.name || '(без названия)'}</div>
         <div class="card-sub">${p.category || '—'}${p.subcategory ? ' › ' + p.subcategory : ''} · ${priceLineHTML(p)}${badgeTag}</div>
+        <div class="card-sub">${p.cost_price != null ? `Закупка: ${fmt(p.cost_price)} · Прибыль с шт.: <b style="color:${p.unit_profit < 0 ? 'var(--danger)' : 'var(--lime)'};">${fmt(p.unit_profit)}</b>` : 'Закупочная цена не указана'}</div>
         <div class="card-sub">Вкусы / цвета: ${(p.sizes||[]).join(', ')}</div>
         <div class="card-sub">${photoCount ? `Фото: ${photoCount}` : 'Без фото'}</div>
         ${stockRowHTML(p)}
@@ -993,10 +1013,11 @@ function renderOrders(){
         </div>
         <span class="status-badge status-${o.status}">${statusLabel(o.status)}</span>
       </div>
-      <div class="order-items">${(o.items||[]).map(i=>`${i.name} (${i.size||'—'}) × ${i.qty}`).join('<br>')}</div>
-      ${o.delivery ? `<div class="card-sub" style="color:var(--text);line-height:1.7;">${o.delivery.mode==='delivery' ? '🚚 Доставка: '+(o.delivery.address||'—')+' (+'+fmt(o.delivery.fee||0)+')' : '📍 Самовывоз: '+(o.delivery.point||'—')}<br>${o.delivery.asap ? '⚡ Как можно скорее' : '🕒 '+(o.delivery.date||'').split('-').reverse().slice(0,2).join('.')+' в '+(o.delivery.time||'')}</div>` : ''}
+      <div class="order-items">${(o.items||[]).map(i=>`${i.name} (${i.size||'—'}) × ${i.qty}` + (i.profit != null ? ` <span class="muted">· закупка ${fmt(i.cost_price)} · прибыль ${fmt(i.unit_profit)}/шт. = <b style="color:${i.profit < 0 ? 'var(--danger)' : 'var(--lime)'};">${fmt(i.profit)}</b></span>` : ` <span class="muted">· закупка не указана</span>`)).join('<br>')}</div>
+      ${o.delivery ? `<div class="card-sub" style="color:var(--text);line-height:1.7;">${o.delivery.mode==='delivery' ? '🚚 Доставка: '+(o.delivery.district ? o.delivery.district+', ' : '')+(o.delivery.address||'—')+' (+'+fmt(o.delivery.fee||0)+')' : '📍 Самовывоз: '+(o.delivery.point||'—')}<br>${o.delivery.asap ? '⚡ Как можно скорее' : '🕒 '+(o.delivery.date||'').split('-').reverse().slice(0,2).join('.')+' в '+(o.delivery.time||'')}</div>` : ''}
       ${o.discount ? `<div class="card-sub">Промокод: ${o.promo_code} (−${fmt(o.discount)}) · Сумма товаров: ${fmt(o.subtotal)}</div>` : ''}
       <div class="card-sub">Итого: ${fmt(o.total)}</div>
+      <div class="card-sub">Общая прибыль по заказу: <b style="color:${o.profit_total < 0 ? 'var(--danger)' : 'var(--lime)'};">${fmt(o.profit_total)}</b>${o.profit_complete ? '' : ' <span class="muted">(без товаров с неуказанной закупкой)</span>'}</div>
       <div class="order-contact">
         👤 ${o.name}<br>
         📞 <a href="tel:${o.phone}">${o.phone}</a>${o.customer_username ? ` · <a href="https://t.me/${o.customer_username}" target="_blank" rel="noopener">@${o.customer_username}</a>` : ''}
@@ -1144,6 +1165,123 @@ async function sendQuestionMessage(id){
 }
 
 // --- Баллы покупателей -------------------------------------------------
+let sales = null;
+
+let districts = null;
+
+function renderDistricts(){
+  const list = document.getElementById('list');
+  const countLabel = document.getElementById('countLabel');
+  if (!districts){ countLabel.textContent = ''; list.innerHTML = '<div class="empty">Не удалось загрузить данные.</div>'; return; }
+  countLabel.textContent = `${districts.length} район(ов)`;
+  list.innerHTML = `
+    <div class="loy-card">
+      <div class="card-title" style="margin-bottom:10px;">Новый район</div>
+      <div class="msg-row" style="margin-top:0;">
+        <input type="text" id="dNewName" placeholder="Название района" maxlength="64">
+        <input type="number" id="dNewFee" min="0" step="1" inputmode="decimal" placeholder="Цена, ₽" style="max-width:120px;">
+        <button class="btn" id="dAddBtn">Добавить</button>
+      </div>
+    </div>
+    <div class="card-sub" style="margin:0 0 12px;">Цена района добавляется к заказу при доставке. Если районов нет совсем, действует единая цена доставки. Бесплатная доставка от суммы заказа (FREE_DELIVERY_FROM) работает как раньше.</div>
+    ${districts.length ? districts.map(d => `
+      <div class="loy-card" data-did="${d.id}">
+        <div class="msg-row" style="margin-top:0;">
+          <input type="text" data-f="name" value="${escR(d.name)}" maxlength="64">
+          <input type="number" data-f="fee" value="${d.fee}" min="0" step="1" inputmode="decimal" style="max-width:120px;">
+        </div>
+        <div class="loy-actions" style="margin-top:10px;">
+          <button class="btn-outline" data-act="toggle">${d.active ? 'Скрыть от покупателей' : 'Показать покупателям'}</button>
+          <button class="btn" data-act="save">Сохранить</button>
+          <button class="btn-outline" data-act="del">Удалить</button>
+        </div>
+        <div class="card-sub" style="margin-top:8px;">${d.active ? '🟢 Активен' : '⚪ Скрыт'}</div>
+      </div>`).join('') : '<div class="empty">Районов пока нет — добавьте первый.</div>'}`;
+
+  document.getElementById('dAddBtn').onclick = async () => {
+    try {
+      await api('/api/admin/districts', { method:'POST', headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({ name: document.getElementById('dNewName').value, fee: document.getElementById('dNewFee').value }) });
+      districts = await api('/api/admin/districts');
+      renderDistricts();
+      showToast('Район добавлен');
+    } catch(e){ showToast(e.message); }
+  };
+  list.querySelectorAll('[data-did]').forEach(card => {
+    const id = Number(card.dataset.did);
+    const put = async body => {
+      try {
+        await api(`/api/admin/districts/${id}`, { method:'PUT', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(body) });
+        districts = await api('/api/admin/districts');
+        renderDistricts();
+        showToast('Сохранено');
+      } catch(e){ showToast(e.message); }
+    };
+    card.querySelector('[data-act="save"]').onclick = () => put({
+      name: card.querySelector('[data-f="name"]').value, fee: card.querySelector('[data-f="fee"]').value });
+    card.querySelector('[data-act="toggle"]').onclick = () => put({ active: !districts.find(x => x.id === id).active });
+    card.querySelector('[data-act="del"]').onclick = async () => {
+      if (!confirm('Удалить район? В уже оформленных заказах он сохранится.')) return;
+      try {
+        await api(`/api/admin/districts/${id}`, { method:'DELETE' });
+        districts = await api('/api/admin/districts');
+        renderDistricts();
+        showToast('Район удалён');
+      } catch(e){ showToast(e.message); }
+    };
+  });
+}
+
+let topData = null;
+let topPeriod = 'today';
+const TOP_PERIODS = { today:'Сегодня', week:'7 дней', month:'Месяц', all:'Всё время' };
+
+function renderTop(){
+  const countLabel = document.getElementById('countLabel');
+  const list = document.getElementById('list');
+  if (!topData){ countLabel.textContent = ''; list.innerHTML = '<div class="empty">Не удалось загрузить данные.</div>'; return; }
+  const d = topData[topPeriod];
+  countLabel.textContent = `подтверждённых заказов: ${d.orders}`;
+  const col = v => v < 0 ? 'var(--danger)' : 'var(--lime)';
+  list.innerHTML = `
+    <div class="badge-picker" id="topPeriods" style="margin-bottom:14px;">
+      ${Object.entries(TOP_PERIODS).map(([k,t]) => `<button type="button" class="badge-opt${k===topPeriod?' active':''}" data-period="${k}">${t}</button>`).join('')}
+    </div>
+    ${d.products.length ? d.products.map(p => `
+      <div class="card">
+        <div class="card-body">
+          <div class="card-title">#${p.rank} · ${escR(p.name)}</div>
+          <div class="card-sub">Продано: <b>${nfmt(p.units)} шт.</b> · Выручка: <b>${fmt(p.revenue)}</b> · Прибыль: <b style="color:${col(p.profit)};">${fmt(p.profit)}</b>${p.profit_complete ? '' : ' <span class="muted">(закупка указана не везде)</span>'}</div>
+        </div>
+      </div>`).join('') : '<div class="empty">За этот период подтверждённых продаж нет.</div>'}`;
+  list.querySelectorAll('[data-period]').forEach(b => b.onclick = () => { topPeriod = b.dataset.period; renderTop(); });
+}
+
+function renderSales(){
+  const countLabel = document.getElementById('countLabel');
+  const list = document.getElementById('list');
+  if (!sales){ countLabel.textContent = ''; list.innerHTML = '<div class="empty">Не удалось загрузить данные.</div>'; return; }
+  countLabel.textContent = 'без отменённых и отклонённых заказов';
+  const col = v => v < 0 ? 'var(--danger)' : 'var(--lime)';
+  const note = '<span class="muted"> (без товаров с неуказанной закупкой)</span>';
+  list.innerHTML = `
+    <div class="loy-summary" style="grid-template-columns:repeat(2,1fr);">
+      <div class="loy-stat"><b>${nfmt(sales.units)}</b><span>Продано единиц</span></div>
+      <div class="loy-stat"><b>${nfmt(sales.orders)}</b><span>Заказов</span></div>
+      <div class="loy-stat"><b>${fmt(sales.revenue)}</b><span>Выручка</span></div>
+      <div class="loy-stat"><b style="color:${col(sales.profit)};">${fmt(sales.profit)}</b><span>Прибыль${sales.profit_complete ? '' : ' *'}</span></div>
+    </div>
+    ${sales.profit_complete ? '' : '<div class="card-sub" style="margin:8px 0;">* Прибыль посчитана только по товарам с указанной закупочной ценой.</div>'}
+    ${sales.products.length ? sales.products.map(p => `
+      <div class="card">
+        <div class="card-body">
+          <div class="card-title">#${p.rank} · ${escR(p.name)}</div>
+          <div class="card-sub">${escR(p.category || '—')}</div>
+          <div class="card-sub">Продано: <b>${nfmt(p.units)} шт.</b> · Заказов: <b>${nfmt(p.orders)}</b> · Выручка: <b>${fmt(p.revenue)}</b> · Прибыль: <b style="color:${col(p.profit)};">${fmt(p.profit)}</b>${p.profit_complete ? '' : note}</div>
+        </div>
+      </div>`).join('') : '<div class="empty">Пока нет продаж.</div>'}`;
+}
+
 let loyalty = { customers: [], point_value: 0.5, total_points: 0, with_points: 0 };
 let loyQuery = '';
 let loyCurrent = null;       // клиент, открытый в окне управления
@@ -1601,6 +1739,14 @@ document.querySelectorAll('#badgePicker .badge-opt').forEach(btn=>{
   btn.onclick = () => { selectedBadge = btn.dataset.badge; renderBadgePicker(); };
 });
 
+function updateProfitHint(){
+  const price = parseFloat(document.getElementById('fPrice').value);
+  const cost = parseFloat(document.getElementById('fCostPrice').value);
+  document.getElementById('fProfitHint').textContent =
+    (isFinite(price) && isFinite(cost)) ? `Прибыль с одной штуки: ${fmt(Math.round((price - cost) * 100) / 100)}` : '';
+}
+['fPrice','fCostPrice'].forEach(id => document.getElementById(id).addEventListener('input', updateProfitHint));
+
 function openModal(id){
   editingId = id || null;
   uploadedImages = [];
@@ -1615,6 +1761,8 @@ function openModal(id){
   document.getElementById('subList').innerHTML = [...new Set((typeof products!=='undefined'?products:[]).map(x=>x.subcategory).filter(Boolean))].map(s=>`<option value="${s}">`).join('');
   document.getElementById('fPrice').value = p?.price || '';
   document.getElementById('fOldPrice').value = p?.old_price || '';
+  document.getElementById('fCostPrice').value = (p && p.cost_price != null) ? p.cost_price : '';
+  updateProfitHint();
   document.getElementById('fStock').value = (p && p.stock != null) ? p.stock : '';
   document.getElementById('fSizes').value = (p?.sizes||[]).join(', ');
   document.getElementById('fDesc').value = p?.desc || '';
@@ -1711,7 +1859,7 @@ document.getElementById('saveBtn').onclick = async () => {
     return;
   }
 
-  const payload = { name, category, subcategory: document.getElementById('fSub').value.trim(), price, old_price: oldPrice, stock: document.getElementById('fStock').value, badge: selectedBadge, sizes, desc, swatch: selectedSwatch, images: uploadedImages };
+  const payload = { name, category, subcategory: document.getElementById('fSub').value.trim(), price, old_price: oldPrice, cost_price: document.getElementById('fCostPrice').value, stock: document.getElementById('fStock').value, badge: selectedBadge, sizes, desc, swatch: selectedSwatch, images: uploadedImages };
   const btn = document.getElementById('saveBtn');
   btn.disabled = true;
   try {
