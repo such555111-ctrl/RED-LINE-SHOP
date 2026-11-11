@@ -1616,8 +1616,7 @@ def cmd_start(message: types.Message):
         "🖤 *RED LINE SHOP*\n\n"
         "*Кызыл. Всё оригинал.*\n"
         "Выбирайте товары в каталоге.\n"
-        f"🚚 Доставка — {DELIVERY_FEE} ₽" + (f", при покупке от {FREE_DELIVERY_FROM} ₽ — бесплатно" if FREE_DELIVERY_FROM > 0 else "") + "\n"
-        "📦 Доставка по России — от Пятёрочки: получение на кассах или в постаматах\n\n"
+        "🚚 Отправляем в районы республики\n\n"
         "Нажмите кнопку ниже, чтобы открыть каталог и оформить заказ.",
         reply_markup=keyboard,
         parse_mode="Markdown",
