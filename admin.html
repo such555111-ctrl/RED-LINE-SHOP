@@ -362,6 +362,14 @@
   .stock-step{width:32px;height:32px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg-elev);color:var(--text);font-size:18px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s var(--ease);padding:0;}
   .stock-step:hover{border-color:var(--accent);}
   .stock-step:active{transform:scale(.88);}
+  .fl-row{display:flex;align-items:center;gap:8px;margin-bottom:8px;}
+  .fl-row .fl-name{flex:1;min-width:0;}
+  .fl-row .fl-qty{width:84px;flex:0 0 auto;text-align:center;}
+  .fl-row .fl-del{flex:0 0 auto;width:38px;height:38px;border-radius:10px;border:1.5px solid var(--line);background:transparent;color:var(--danger);cursor:pointer;font-size:16px;}
+  .flavor-list{margin-top:8px;display:grid;gap:6px;}
+  .flavor-list .stock-row{margin:0;}
+  .flavor-list .fl-label{flex:1;min-width:0;font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .order-flavor{display:inline-block;margin-left:4px;padding:1px 8px;border-radius:8px;background:rgba(255,90,99,.12);border:1px solid rgba(255,90,99,.35);color:var(--text);font-weight:700;}
   .stock-input[type=number]{width:62px;height:32px;padding:0 6px;text-align:center;font-family:var(--font-heading);font-weight:800;font-size:15px;border-radius:10px;-moz-appearance:textfield;}
   .stock-input::-webkit-outer-spin-button,.stock-input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0;}
   .stock-state{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:700;color:var(--muted);margin-left:auto;}
@@ -514,6 +522,15 @@
   .login-box .rl-hero-av{width:150px;margin:0 auto 10px;}
   @media (max-width:430px){.brand .rl-av-sm{width:28px;height:28px;}}
   @media (prefers-reduced-motion:reduce){.rl-hero-av::before,.rl-hero-av::after,.rl-hero-av .rl-av{animation:none!important;}}
+
+  /* --- Акции и объявления --- */
+  .ann-img{display:flex;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap;}
+  .ann-thumb{width:84px;height:84px;border-radius:12px;border:1.5px dashed var(--line);background:var(--bg-elev) center/cover no-repeat;display:flex;align-items:center;justify-content:center;color:var(--muted,#888);font-size:12px;text-align:center;flex:0 0 auto;}
+  .ann-lbl{display:block;font-size:12px;margin:10px 0 4px;opacity:.75;}
+  .ann-dates{display:flex;gap:8px;flex-wrap:wrap;}
+  .ann-dates > div{flex:1 1 170px;min-width:0;}
+  .ann-dates input[type=datetime-local]{width:100%;}
+  .ann-form input[type=url]{width:100%;}
 </style>
 </head>
 <body>
@@ -553,7 +570,9 @@
     <button class="tab-btn" data-tab="orders">Заказы<span class="tab-badge" id="ordersBadge" style="display:none;"></span></button>
     <button class="tab-btn" data-tab="questions">Вопросы<span class="tab-badge" id="questionsBadge" style="display:none;"></span></button>
     <button class="tab-btn" data-tab="reviews">Отзывы<span class="tab-badge" id="reviewsBadge" style="display:none;"></span></button>
+    <button class="tab-btn" data-tab="ratings">Оценки</button>
     <button class="tab-btn" data-tab="promos">Промокоды</button>
+    <button class="tab-btn" data-tab="announcements">Акции и объявления</button>
     <span class="tabs-break"></span>
     <button class="tab-btn" data-tab="loyalty">Баллы</button>
     <button class="tab-btn" data-tab="sales">Продажи товаров</button>
@@ -604,7 +623,7 @@
     <label>Старая цена, ₽ <span class="muted" style="text-transform:none;letter-spacing:0;">— необязательно, покажется зачёркнутой рядом с новой ценой</span></label>
     <input type="number" id="fOldPrice" placeholder="2100">
 
-    <label>Остаток на складе, шт. <span class="muted" style="text-transform:none;letter-spacing:0;">— покупатели видят «Осталось N шт.»; пусто = учёт не ведётся</span></label>
+    <label id="lblStock">Остаток на складе, шт. <span class="muted" style="text-transform:none;letter-spacing:0;">— покупатели видят «Осталось N шт.»; пусто = учёт не ведётся</span></label>
     <input type="number" id="fStock" min="0" inputmode="numeric" placeholder="25">
 
     <label>Бейдж на карточке</label>
@@ -616,8 +635,12 @@
       <button type="button" class="badge-opt" data-badge="instock">В наличии</button>
     </div>
 
-    <label>Вкусы / цвета <span class="muted" style="text-transform:none;letter-spacing:0;">— через запятую</span></label>
+    <label id="lblSizes">Вкусы / цвета <span class="muted" style="text-transform:none;letter-spacing:0;">— через запятую (без отдельных остатков)</span></label>
     <input type="text" id="fSizes" placeholder="Виноград, Манго, Ледяная мята">
+
+    <label>Вкусы с отдельными остатками <span class="muted" style="text-transform:none;letter-spacing:0;">— если добавить хотя бы один, общий остаток и список выше считаются из вкусов</span></label>
+    <div id="flavorRows"></div>
+    <button type="button" class="btn-outline" id="addFlavorBtn" style="margin:0 0 14px;">+ Добавить вкус</button>
 
     <label>Описание</label>
     <textarea id="fDesc" placeholder="Ресурс, особенности, комплектация"></textarea>
@@ -830,7 +853,7 @@ async function enterApp(){
   await loadPromos();
 }
 
-const TAB_TITLES = { products:'Товары', orders:'Заказы', questions:'Вопросы', reviews:'Отзывы', promos:'Промокоды', loyalty:'Баллы покупателей', sales:'Продажи товаров', top:'Топ товаров', districts:'Районы доставки' };
+const TAB_TITLES = { products:'Товары', orders:'Заказы', questions:'Вопросы', reviews:'Отзывы', ratings:'Оценки товаров', promos:'Промокоды', announcements:'Акции и объявления', loyalty:'Баллы покупателей', sales:'Продажи товаров', top:'Топ товаров', districts:'Районы доставки' };
 
 document.querySelectorAll('.tab-btn').forEach(btn=>{
   btn.onclick = async () => {
@@ -851,6 +874,13 @@ document.querySelectorAll('.tab-btn').forEach(btn=>{
     } else if (currentTab === 'reviews'){
       await loadReviews();
       renderReviews();
+    } else if (currentTab === 'ratings'){
+      await loadRatings();
+      if (currentTab === 'ratings') renderRatings();
+    } else if (currentTab === 'announcements'){
+      document.getElementById('list').innerHTML = '<div class="empty">Загрузка…</div>';
+      try { announcements = await api('/api/admin/announcements'); } catch(e){ showToast(e.message); announcements = null; }
+      if (currentTab === 'announcements') renderAnnouncements();
     } else if (currentTab === 'districts'){
       document.getElementById('list').innerHTML = '<div class="empty">Загрузка…</div>';
       try { districts = await api('/api/admin/districts'); } catch(e){ showToast(e.message); districts = null; }
@@ -920,6 +950,14 @@ function renderList(){
   `;
   }).join('');
   list.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => openModal(Number(b.dataset.edit)));
+  list.querySelectorAll('[data-fstep]').forEach(b => b.onclick = () => {
+    const p = products.find(x => x.id === Number(b.dataset.id));
+    const f = p && p.flavors && p.flavors[Number(b.dataset.fi)];
+    if (f) setFlavorStock(p.id, Number(b.dataset.fi), Math.max(0, f.stock + Number(b.dataset.fstep)));
+  });
+  list.querySelectorAll('.fl-stock-input').forEach(inp => inp.onchange = () => {
+    setFlavorStock(Number(inp.dataset.id), Number(inp.dataset.fi), Math.max(0, Math.floor(Number(inp.value)) || 0));
+  });
   list.querySelectorAll('[data-stock-step]').forEach(b => b.onclick = () => {
     const p = products.find(x => x.id === Number(b.dataset.id));
     if (!p) return;
@@ -942,6 +980,20 @@ function stockState(stock){
 }
 
 function stockRowHTML(p){
+  if (p.flavors && p.flavors.length){
+    const st = stockState(p.stock);
+    return `<div class="stock-row"><span class="stock-label">Остаток всего</span><b>${p.stock} шт.</b><span class="stock-state ${st.cls}"><i></i>${st.text}</span></div>
+    <div class="flavor-list">${p.flavors.map((f,i) => {
+      const fs = stockState(f.stock);
+      return `<div class="stock-row">
+        <span class="fl-label" title="${esc(f.name)}">${esc(f.name)}</span>
+        <button class="stock-step" type="button" data-fstep="-1" data-id="${p.id}" data-fi="${i}" aria-label="Минус один">−</button>
+        <input class="stock-input fl-stock-input" type="number" min="0" inputmode="numeric" data-id="${p.id}" data-fi="${i}" value="${f.stock}">
+        <button class="stock-step" type="button" data-fstep="1" data-id="${p.id}" data-fi="${i}" aria-label="Плюс один">+</button>
+        <span class="stock-state ${fs.cls}"><i></i>${fs.text}</span>
+      </div>`;
+    }).join('')}</div>`;
+  }
   const st = stockState(p.stock);
   return `<div class="stock-row">
     <span class="stock-label">Остаток</span>
@@ -950,6 +1002,25 @@ function stockRowHTML(p){
     <button class="stock-step" type="button" data-stock-step="1" data-id="${p.id}" aria-label="Плюс один">+</button>
     <span class="stock-state ${st.cls}"><i></i>${st.text}</span>
   </div>`;
+}
+
+async function setFlavorStock(id, idx, value){
+  const p = products.find(x => x.id === id);
+  if (!p || !p.flavors || !p.flavors[idx]) return;
+  const prev = p.flavors.map(f => ({ ...f }));
+  p.flavors[idx].stock = value;
+  renderList();
+  try {
+    const updated = await api(`/api/admin/products/${id}`, {
+      method:'PUT', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ flavors: p.flavors })
+    });
+    products = products.map(x => x.id === id ? updated : x);
+  } catch(e){
+    p.flavors = prev;
+    showToast(e.message);
+  }
+  renderList();
+  if (typeof updateStats === 'function') updateStats();
 }
 
 async function setStock(id, value){
@@ -1017,7 +1088,7 @@ function renderOrders(){
         </div>
         <span class="status-badge status-${o.status}">${statusLabel(o.status)}</span>
       </div>
-      <div class="order-items">${(o.items||[]).map(i=>`${i.name} (${i.size||'—'}) × ${i.qty}` + (i.profit != null ? ` <span class="muted">· закупка ${fmt(i.cost_price)} · прибыль ${fmt(i.unit_profit)}/шт. = <b style="color:${i.profit < 0 ? 'var(--danger)' : 'var(--lime)'};">${fmt(i.profit)}</b></span>` : ` <span class="muted">· закупка не указана</span>`)).join('<br>')}</div>
+      <div class="order-items">${(o.items||[]).map(i=>(i.flavor ? `${i.name} <span class="order-flavor">вкус: ${esc(i.flavor)}</span> × <b>${i.qty} шт.</b>` : `${i.name} (${i.size||'—'}) × ${i.qty}`) + (i.profit != null ? ` <span class="muted">· закупка ${fmt(i.cost_price)} · прибыль ${fmt(i.unit_profit)}/шт. = <b style="color:${i.profit < 0 ? 'var(--danger)' : 'var(--lime)'};">${fmt(i.profit)}</b></span>` : ` <span class="muted">· закупка не указана</span>`)).join('<br>')}</div>
       ${o.delivery ? `<div class="card-sub" style="color:var(--text);line-height:1.7;">${o.delivery.mode==='delivery' ? '🚚 Доставка: '+(o.delivery.district ? o.delivery.district+', ' : '')+(o.delivery.address||'—')+' (+'+fmt(o.delivery.fee||0)+')'+(o.delivery.payment_method ? '<br>💳 '+({prepay:'Предоплата',courier:'Оплата курьеру по договорённости'}[o.delivery.payment_method]||o.delivery.payment_method) : '') : '📍 Самовывоз: '+(o.delivery.point||'—')}<br>${o.delivery.asap ? '⚡ Как можно скорее' : '🕒 '+(o.delivery.date||'').split('-').reverse().slice(0,2).join('.')+' в '+(o.delivery.time||'')}</div>` : ''}
       ${o.discount ? `<div class="card-sub">Промокод: ${o.promo_code} (−${fmt(o.discount)}) · Сумма товаров: ${fmt(o.subtotal)}</div>` : ''}
       <div class="card-sub">Итого: ${fmt(o.total)}</div>
@@ -1245,6 +1316,131 @@ function renderDistricts(){
         renderDistricts();
         showToast('Район удалён');
       } catch(e){ showToast(e.message); }
+    };
+  });
+}
+
+// --- Акции и объявления ------------------------------------------------
+let announcements = null;
+const ANN_STATUS = { active:'🟢 Показывается', scheduled:'🕒 Ещё не началось', expired:'⏹ Срок истёк (скрыто)', disabled:'⚪ Отключено' };
+const isoToLocal = iso => {
+  if (!iso) return '';
+  const d = new Date(iso); if (isNaN(d)) return '';
+  const p = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+const localToIso = v => { if (!v) return null; const d = new Date(v); return isNaN(d) ? null : d.toISOString(); };
+const fmtAnnDate = iso => iso ? new Date(iso).toLocaleString('ru-RU', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }) : '';
+
+function annFormHTML(a){
+  return `
+    <label class="ann-lbl">Заголовок *</label>
+    <input type="text" data-f="title" value="${escR(a.title||'')}" maxlength="120" placeholder="Например: Скидка 10% на жидкости">
+    <label class="ann-lbl">Текст</label>
+    <textarea data-f="text" maxlength="2000" placeholder="Подробности акции или объявления">${escR(a.text||'')}</textarea>
+    <label class="ann-lbl">Изображение</label>
+    <div class="ann-img">
+      <div class="ann-thumb" data-thumb style="${a.image ? `background-image:url('${escR(a.image)}');border-style:solid;` : ''}">${a.image ? '' : 'Нет фото'}</div>
+      <input type="file" data-f="file" accept="image/*" style="display:none;">
+      <button type="button" class="btn-outline" data-act="pick">Загрузить фото</button>
+      <button type="button" class="btn-outline" data-act="clearimg"${a.image ? '' : ' style="display:none;"'}>Убрать фото</button>
+    </div>
+    <label class="ann-lbl">Ссылка (необязательно)</label>
+    <input type="text" data-f="link" value="${escR(a.link||'')}" maxlength="500" placeholder="https://… или @username">
+    <label class="ann-lbl">Текст кнопки ссылки (необязательно)</label>
+    <input type="text" data-f="link_label" value="${escR(a.link_label||'')}" maxlength="40" placeholder="Подробнее">
+    <div class="ann-dates">
+      <div><label class="ann-lbl">Показывать с</label><input type="datetime-local" data-f="starts_at" value="${isoToLocal(a.starts_at)}"></div>
+      <div><label class="ann-lbl">Показывать до</label><input type="datetime-local" data-f="ends_at" value="${isoToLocal(a.ends_at)}"></div>
+    </div>
+    <div class="card-sub" style="margin-top:6px;">Пустые даты — без ограничения. После даты «до» объявление скрывается автоматически.</div>`;
+}
+
+function bindAnnForm(card, initialImage){
+  let image = initialImage || '';
+  const thumb = card.querySelector('[data-thumb]');
+  const file = card.querySelector('[data-f="file"]');
+  const clearBtn = card.querySelector('[data-act="clearimg"]');
+  const setImg = url => {
+    image = url || '';
+    thumb.style.backgroundImage = image ? `url('${image}')` : '';
+    thumb.style.borderStyle = image ? 'solid' : 'dashed';
+    thumb.textContent = image ? '' : 'Нет фото';
+    clearBtn.style.display = image ? '' : 'none';
+  };
+  card.querySelector('[data-act="pick"]').onclick = () => file.click();
+  clearBtn.onclick = () => setImg('');
+  file.onchange = async () => {
+    const f = file.files[0]; if (!f) return;
+    thumb.textContent = 'Загрузка…';
+    try {
+      const fd = new FormData(); fd.append('file', f);
+      const res = await fetch('/api/admin/upload', { method:'POST', headers:{ 'X-Admin-Password': pwd }, body: fd });
+      if (!res.ok){ const err = await res.json().catch(()=>({})); throw new Error(err.error || 'Не удалось загрузить фото'); }
+      setImg((await res.json()).url);
+    } catch(e){ showToast(e.message); setImg(image); }
+    file.value = '';
+  };
+  return () => ({
+    title: card.querySelector('[data-f="title"]').value,
+    text: card.querySelector('[data-f="text"]').value,
+    image,
+    link: card.querySelector('[data-f="link"]').value,
+    link_label: card.querySelector('[data-f="link_label"]').value,
+    starts_at: localToIso(card.querySelector('[data-f="starts_at"]').value),
+    ends_at: localToIso(card.querySelector('[data-f="ends_at"]').value),
+  });
+}
+
+function renderAnnouncements(){
+  const list = document.getElementById('list');
+  const countLabel = document.getElementById('countLabel');
+  if (!announcements){ countLabel.textContent = ''; list.innerHTML = '<div class="empty">Не удалось загрузить данные.</div>'; return; }
+  const live = announcements.filter(a => a.status === 'active').length;
+  countLabel.textContent = `${announcements.length} всего · ${live} показывается`;
+  list.innerHTML = `
+    <div class="loy-card ann-form" id="annNew">
+      <div class="card-title" style="margin-bottom:6px;">Новое объявление</div>
+      ${annFormHTML({})}
+      <div class="loy-actions" style="margin-top:12px;"><button class="btn" data-act="create">Создать</button></div>
+    </div>
+    ${announcements.length ? announcements.map(a => `
+      <div class="loy-card ann-form" data-aid="${a.id}">
+        <div class="card-sub" style="margin:0 0 4px;">${ANN_STATUS[a.status] || ''}${a.starts_at ? ' · с ' + fmtAnnDate(a.starts_at) : ''}${a.ends_at ? ' · до ' + fmtAnnDate(a.ends_at) : ''}</div>
+        ${annFormHTML(a)}
+        <div class="loy-actions" style="margin-top:12px;">
+          <button class="btn-outline" data-act="toggle">${a.active ? 'Отключить' : 'Включить'}</button>
+          <button class="btn" data-act="save">Сохранить</button>
+          <button class="btn-outline" data-act="del">Удалить</button>
+        </div>
+      </div>`).join('') : '<div class="empty">Объявлений пока нет — создайте первое.</div>'}`;
+
+  const reload = async () => { announcements = await api('/api/admin/announcements'); renderAnnouncements(); };
+  const json = body => ({ headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(body) });
+
+  const newCard = document.getElementById('annNew');
+  const getNew = bindAnnForm(newCard, '');
+  newCard.querySelector('[data-act="create"]').onclick = async () => {
+    try {
+      await api('/api/admin/announcements', { method:'POST', ...json({ ...getNew(), active:true }) });
+      await reload(); showToast('Объявление создано');
+    } catch(e){ showToast(e.message); }
+  };
+
+  list.querySelectorAll('[data-aid]').forEach(card => {
+    const id = Number(card.dataset.aid);
+    const a = announcements.find(x => x.id === id);
+    const get = bindAnnForm(card, a.image);
+    const put = async (body, msg) => {
+      try { await api(`/api/admin/announcements/${id}`, { method:'PUT', ...json(body) }); await reload(); showToast(msg); }
+      catch(e){ showToast(e.message); }
+    };
+    card.querySelector('[data-act="save"]').onclick = () => put(get(), 'Сохранено');
+    card.querySelector('[data-act="toggle"]').onclick = () => put({ active: !a.active }, a.active ? 'Объявление отключено' : 'Объявление включено');
+    card.querySelector('[data-act="del"]').onclick = async () => {
+      if (!confirm('Удалить объявление безвозвратно?')) return;
+      try { await api(`/api/admin/announcements/${id}`, { method:'DELETE' }); await reload(); showToast('Объявление удалено'); }
+      catch(e){ showToast(e.message); }
     };
   });
 }
@@ -1518,6 +1714,7 @@ async function openLoyaltyFor(tgId){
 
 // --- Reviews -------------------------------------------------------
 
+function esc(v){ return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function escR(str){
   return String(str == null ? '' : str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -1581,6 +1778,70 @@ async function deleteReview(id){
     refreshReviewsBadge();
     renderReviews();
     showToast('Отзыв удалён');
+  } catch(e){
+    showToast(e.message);
+  }
+}
+
+// --- Оценки товаров --------------------------------------------------
+
+let ratingsData = { items: [], products: [] };
+let ratingsFilter = '';
+
+async function loadRatings(){
+  try {
+    ratingsData = await api('/api/admin/ratings');
+  } catch(e){
+    ratingsData = { items: [], products: [] };
+    showToast(e.message);
+  }
+}
+
+function renderRatings(){
+  const items = ratingsData.items || [];
+  const prods = ratingsData.products || [];
+  if (ratingsFilter && !prods.some(p => String(p.product_id) === ratingsFilter)) ratingsFilter = '';
+  const shown = ratingsFilter ? items.filter(r => String(r.product_id) === ratingsFilter) : items;
+  document.getElementById('countLabel').textContent = `Оценок: ${shown.length}`;
+  const list = document.getElementById('list');
+  if (items.length === 0){
+    list.innerHTML = '<div class="empty">Оценок товаров пока нет.</div>';
+    return;
+  }
+  const opts = '<option value="">Все товары</option>' + prods.map(p =>
+    `<option value="${p.product_id}"${String(p.product_id) === ratingsFilter ? ' selected' : ''}>${escR(p.name)} — ★ ${p.avg.toFixed(1)} (${p.count})</option>`).join('');
+  list.innerHTML = `<div class="order-card"><select class="order-status-select" id="ratingsFilter" style="width:100%;">${opts}</select></div>` +
+    shown.map(r => {
+      const stars = '★'.repeat(r.rating) + '☆'.repeat(5 - r.rating);
+      const who = r.author_name ? escR(r.author_name) : 'Без имени';
+      return `
+      <div class="order-card">
+        <div class="order-head">
+          <div>
+            <div class="order-id">${escR(r.product_name)}</div>
+            <div class="order-date">${new Date(r.updated_at || r.created_at).toLocaleString('ru-RU')} · ${who} · ID ${escR(r.telegram_id)}</div>
+          </div>
+        </div>
+        <div class="order-items"><span style="color:var(--gold);letter-spacing:.12em;">${stars}</span> (${r.rating}/5)</div>
+        <div class="card-actions" style="margin-top:12px;">
+          <button class="btn-danger" data-rating-del="${r.id}">Удалить</button>
+        </div>
+      </div>`;
+    }).join('');
+  document.getElementById('ratingsFilter').onchange = (e) => { ratingsFilter = e.target.value; renderRatings(); };
+  list.querySelectorAll('[data-rating-del]').forEach(btn => {
+    btn.onclick = () => deleteRating(Number(btn.dataset.ratingDel));
+  });
+}
+
+async function deleteRating(id){
+  const r = (ratingsData.items || []).find(x => x.id === id);
+  if (!confirm(`Удалить оценку ${r ? r.rating + '/5 от «' + (r.author_name || r.telegram_id) + '»' : ''}?`)) return;
+  try {
+    await api(`/api/admin/ratings/${id}`, { method:'DELETE' });
+    await loadRatings();
+    if (currentTab === 'ratings') renderRatings();
+    showToast('Оценка удалена');
   } catch(e){
     showToast(e.message);
   }
@@ -1782,6 +2043,8 @@ function openModal(id){
   updateProfitHint();
   document.getElementById('fStock').value = (p && p.stock != null) ? p.stock : '';
   document.getElementById('fSizes').value = (p?.sizes||[]).join(', ');
+  flavorRows = (p?.flavors || []).map(f => ({ name:f.name, stock:f.stock }));
+  renderFlavorRows();
   document.getElementById('fDesc').value = p?.desc || '';
   selectedSwatch = p?.swatch || 0;
   selectedBadge = p?.badge || '';
@@ -1862,6 +2125,27 @@ document.getElementById('photoInput').addEventListener('change', async (e) => {
   e.target.value = '';
 });
 
+let flavorRows = [];
+function renderFlavorRows(){
+  const box = document.getElementById('flavorRows');
+  box.innerHTML = flavorRows.map((f,i) => `<div class="fl-row">
+    <input type="text" class="fl-name" data-i="${i}" placeholder="Название вкуса" value="${esc(f.name)}">
+    <input type="number" class="fl-qty" data-i="${i}" min="0" inputmode="numeric" placeholder="шт." value="${f.stock}">
+    <button type="button" class="fl-del" data-i="${i}" aria-label="Удалить вкус">✕</button>
+  </div>`).join('');
+  box.querySelectorAll('.fl-name').forEach(inp => inp.oninput = () => { flavorRows[Number(inp.dataset.i)].name = inp.value; });
+  box.querySelectorAll('.fl-qty').forEach(inp => inp.oninput = () => { flavorRows[Number(inp.dataset.i)].stock = Math.max(0, Math.floor(Number(inp.value)) || 0); });
+  box.querySelectorAll('.fl-del').forEach(b => b.onclick = () => { flavorRows.splice(Number(b.dataset.i), 1); renderFlavorRows(); });
+  const on = flavorRows.length > 0;           // со вкусами общий остаток и список считает сервер
+  ['lblStock','fStock','lblSizes','fSizes'].forEach(id => { document.getElementById(id).style.display = on ? 'none' : ''; });
+}
+document.getElementById('addFlavorBtn').onclick = () => {
+  flavorRows.push({ name:'', stock:0 });
+  renderFlavorRows();
+  const names = document.querySelectorAll('#flavorRows .fl-name');
+  names[names.length - 1]?.focus();
+};
+
 document.getElementById('saveBtn').onclick = async () => {
   const name = document.getElementById('fName').value.trim();
   const category = document.getElementById('fCategory').value.trim();
@@ -1876,7 +2160,7 @@ document.getElementById('saveBtn').onclick = async () => {
     return;
   }
 
-  const payload = { name, category, subcategory: document.getElementById('fSub').value.trim(), price, old_price: oldPrice, cost_price: document.getElementById('fCostPrice').value, stock: document.getElementById('fStock').value, badge: selectedBadge, sizes, desc, swatch: selectedSwatch, images: uploadedImages };
+  const payload = { name, category, subcategory: document.getElementById('fSub').value.trim(), price, old_price: oldPrice, cost_price: document.getElementById('fCostPrice').value, stock: document.getElementById('fStock').value, badge: selectedBadge, sizes, flavors: flavorRows.filter(f => f.name.trim()).map(f => ({ name:f.name.trim(), stock:Number(f.stock) || 0 })), desc, swatch: selectedSwatch, images: uploadedImages };
   const btn = document.getElementById('saveBtn');
   btn.disabled = true;
   try {

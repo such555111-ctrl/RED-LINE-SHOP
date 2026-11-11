@@ -7,6 +7,10 @@ import functools
 import re
 import io
 import math
+import time
+import hmac
+import hashlib
+from urllib.parse import parse_qsl
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask, request, send_from_directory, abort, jsonify, Response
@@ -14,7 +18,7 @@ import telebot
 from telebot import types
 
 from sqlalchemy import (create_engine, Column, Integer, BigInteger, String, Text,
-                        Boolean, DateTime, CheckConstraint, LargeBinary, Float, JSON, func)
+                        Boolean, DateTime, CheckConstraint, UniqueConstraint, LargeBinary, Float, JSON, func)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session
@@ -197,6 +201,11 @@ class Promo(_DocMixin, Base):
     __tablename__ = "promos"
 
 
+class Announcement(_DocMixin, Base):
+    """Акции и объявления для блока в каталоге. Таблица announcements создаётся автоматически."""
+    __tablename__ = "announcements"
+
+
 class StoredImage(Base):
     """Фото товаров хранятся прямо в базе (bytea) и отдаются по /uploads/<имя>."""
     __tablename__ = "images"
@@ -235,6 +244,24 @@ class LoyaltyLog(Base):
     note          = Column(String(255))
     created_at    = Column(DateTime(timezone=True), nullable=False,
                            default=lambda: datetime.now(timezone.utc))
+
+
+class ProductRating(Base):
+    """Оценка товара 1–5 звёзд: один Telegram-аккаунт — одна оценка на товар (можно изменить)."""
+    __tablename__ = "product_ratings"
+    __table_args__ = (
+        UniqueConstraint("product_id", "telegram_id", name="uq_product_ratings_product_user"),
+        CheckConstraint("rating BETWEEN 1 AND 5", name="ck_product_ratings_rating"),
+    )
+    id          = Column(Integer, primary_key=True)
+    product_id  = Column(Integer, nullable=False, index=True)
+    telegram_id = Column(BigInteger, nullable=False, index=True)
+    author_name = Column(String(128))
+    rating      = Column(Integer, nullable=False)
+    created_at  = Column(DateTime(timezone=True), nullable=False,
+                         default=lambda: datetime.now(timezone.utc))
+    updated_at  = Column(DateTime(timezone=True), nullable=False,
+                         default=lambda: datetime.now(timezone.utc))
 
 
 # Отдельная фабрика сессий для данных магазина (не мешает сессиям отзывов).
@@ -407,6 +434,10 @@ def purge_unused_images(candidate_urls):
         for u in (p.get("images") or []) + [p.get("image")]:
             if isinstance(u, str):
                 still_used.add(u.rsplit("/", 1)[-1])
+    for a in _load_docs(Announcement):                 # фото акций и объявлений не трогаем
+        u = a.get("image")
+        if isinstance(u, str):
+            still_used.add(u.rsplit("/", 1)[-1])
     unused = names - still_used
     if not unused:
         return
@@ -664,6 +695,175 @@ def on_review_moderation(call: types.CallbackQuery):
     _finish_moderation_message(call, result_text)
 
 
+# =====================================================================
+#  РЕЙТИНГ ТОВАРОВ (1–5 звёзд): одна оценка от Telegram-аккаунта на товар
+# =====================================================================
+
+RATING_INITDATA_MAX_AGE = 7 * 24 * 3600     # initData старше недели не принимаем
+
+
+def verify_init_data(raw):
+    """Проверяет подпись Telegram WebApp initData (HMAC по токену бота).
+    Возвращает словарь пользователя или None. Telegram ID берём только отсюда,
+    поэтому подделать чужой ID в запросе нельзя."""
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        pairs = dict(parse_qsl(raw, keep_blank_values=True, strict_parsing=True))
+    except ValueError:
+        return None
+    got = pairs.pop("hash", None)
+    if not got:
+        return None
+    check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+    secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+    calc = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calc, got):
+        return None
+    try:
+        if time.time() - int(pairs.get("auth_date", "0")) > RATING_INITDATA_MAX_AGE:
+            return None
+        user = json.loads(pairs.get("user") or "{}")
+        if int(user.get("id")) <= 0:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return user
+
+
+def _iso_dt(dt):
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+def _rating_summary(db, pid):
+    cnt, avg = db.query(func.count(ProductRating.id), func.avg(ProductRating.rating)) \
+                 .filter(ProductRating.product_id == pid).one()
+    return {"avg": round(float(avg), 1) if cnt else 0, "count": int(cnt or 0)}
+
+
+@app.route("/api/ratings", methods=["GET"])
+def get_ratings():
+    """Средний рейтинг и число оценок по всем товарам (+ оценки текущего покупателя в `mine`)."""
+    db = SessionLocal()
+    try:
+        rows = (db.query(ProductRating.product_id, func.count(ProductRating.id), func.avg(ProductRating.rating))
+                  .group_by(ProductRating.product_id).all())
+        summary = {str(pid): {"avg": round(float(avg), 1), "count": int(cnt)} for pid, cnt, avg in rows}
+        mine = {}
+        user = verify_init_data(request.headers.get("X-Telegram-Init-Data"))
+        if user:
+            for pid, rt in (db.query(ProductRating.product_id, ProductRating.rating)
+                              .filter(ProductRating.telegram_id == int(user["id"])).all()):
+                mine[str(pid)] = rt
+        resp = jsonify({"ratings": summary, "mine": mine})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    except Exception:
+        log.exception("Не удалось загрузить рейтинги")
+        return jsonify({"error": "Не удалось загрузить рейтинги"}), 500
+
+
+@app.route("/api/products/<int:pid>/rating", methods=["POST"])
+def rate_product(pid):
+    user = verify_init_data(request.headers.get("X-Telegram-Init-Data"))
+    if not user:
+        abort(401, description="Откройте магазин через Telegram, чтобы поставить оценку")
+    tg_id = int(user["id"])
+
+    data = request.get_json(force=True, silent=True) or {}
+    raw = data.get("rating")
+    try:
+        if isinstance(raw, bool):
+            raise ValueError
+        rating = int(raw)
+    except (TypeError, ValueError):
+        abort(400, description="Поставьте оценку от 1 до 5")
+    if not 1 <= rating <= 5:
+        abort(400, description="Оценка должна быть от 1 до 5")
+
+    if not any(p.get("id") == pid for p in load_products()):
+        abort(404, description="Товар не найден")
+
+    name = " ".join(" ".join(filter(None, [user.get("first_name"), user.get("last_name")])).split())
+    name = (name or user.get("username") or "Покупатель")[:128]
+
+    db = SessionLocal()
+    try:
+        def upsert():
+            row = db.query(ProductRating).filter(
+                ProductRating.product_id == pid, ProductRating.telegram_id == tg_id).first()
+            now = datetime.now(timezone.utc)
+            if row:
+                row.rating, row.author_name, row.updated_at = rating, name, now
+            else:
+                db.add(ProductRating(product_id=pid, telegram_id=tg_id, author_name=name,
+                                     rating=rating, created_at=now, updated_at=now))
+        upsert()
+        try:
+            db.commit()
+        except IntegrityError:          # две одновременные первые оценки — обновляем существующую
+            db.rollback()
+            upsert()
+            db.commit()
+        return jsonify({"ok": True, "mine": rating, "summary": _rating_summary(db, pid)})
+    except Exception:
+        db.rollback()
+        log.exception("Не удалось сохранить оценку товара %s", pid)
+        return jsonify({"error": "Не удалось сохранить оценку"}), 500
+
+
+@app.route("/api/admin/ratings", methods=["GET"])
+def admin_get_ratings():
+    require_admin()
+    db = SessionLocal()
+    try:
+        names = {p.get("id"): p.get("name") for p in load_products()}
+        rows = db.query(ProductRating).order_by(ProductRating.updated_at.desc(), ProductRating.id.desc()).all()
+        items = [{
+            "id": r.id,
+            "product_id": r.product_id,
+            "product_name": names.get(r.product_id) or "Товар удалён",
+            "telegram_id": r.telegram_id,
+            "author_name": r.author_name or "",
+            "rating": r.rating,
+            "created_at": _iso_dt(r.created_at),
+            "updated_at": _iso_dt(r.updated_at),
+        } for r in rows]
+        agg = (db.query(ProductRating.product_id, func.count(ProductRating.id), func.avg(ProductRating.rating))
+                 .group_by(ProductRating.product_id).all())
+        products_sum = sorted(
+            [{"product_id": pid, "name": names.get(pid) or "Товар удалён",
+              "avg": round(float(avg), 1), "count": int(cnt)} for pid, cnt, avg in agg],
+            key=lambda x: (x["name"] or "").lower())
+        return jsonify({"items": items, "products": products_sum})
+    except Exception:
+        log.exception("Не удалось загрузить оценки для админ-панели")
+        return jsonify({"error": "Не удалось загрузить оценки"}), 500
+
+
+@app.route("/api/admin/ratings/<int:rid>", methods=["DELETE"])
+def admin_delete_rating(rid):
+    require_admin()
+    db = SessionLocal()
+    try:
+        row = db.get(ProductRating, rid)
+        if row is None:
+            abort(404, description="Оценка не найдена")
+        db.delete(row)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        if getattr(e, "code", None) == 404:
+            raise
+        log.exception("Не удалось удалить оценку %s", rid)
+        return jsonify({"error": "Не удалось удалить оценку"}), 500
+    return "", 204
+
+
 # --- Вспомогательные функции для товаров и авторизации админа -----------
 
 # Данные лежат в json-файлах, а gunicorn работает в нескольких потоках —
@@ -717,6 +917,14 @@ def load_districts():
 
 def save_districts(items):
     _save_docs(District, items)
+
+
+def load_announcements():
+    return _load_docs(Announcement)
+
+
+def save_announcements(items):
+    _save_docs(Announcement, items)
 
 
 def load_promos():
@@ -786,6 +994,61 @@ def sanitize_stock(raw):
     return max(0, min(v, 1_000_000))
 
 
+def sanitize_flavors(raw):
+    """Вкусы товара: список {name, stock}, stock — целое >= 0. Дубли по названию объединяются (последний выигрывает)."""
+    if not isinstance(raw, list):
+        return []
+    out, seen = [], {}
+    for f in raw:
+        if isinstance(f, str):
+            f = {"name": f, "stock": 0}
+        if not isinstance(f, dict):
+            continue
+        name = str(f.get("name") or "").strip()[:60]
+        if not name:
+            continue
+        try:
+            stock = max(0, min(int(float(f.get("stock") or 0)), 1_000_000))
+        except (TypeError, ValueError):
+            stock = 0
+        key = name.casefold()
+        if key in seen:
+            out[seen[key]]["stock"] = stock
+        else:
+            seen[key] = len(out)
+            out.append({"name": name, "stock": stock})
+    return out
+
+
+def apply_flavors(p):
+    """Если у товара есть вкусы — общий остаток = сумма остатков вкусов, а список вариантов = названия вкусов
+    (так витрина, корзина и поиск работают как раньше). Без вкусов товар ведёт себя по-старому."""
+    fl = sanitize_flavors(p.get("flavors"))
+    if fl:
+        p["flavors"] = fl
+        p["sizes"] = [f["name"] for f in fl]
+        p["stock"] = sum(f["stock"] for f in fl)
+    else:
+        p.pop("flavors", None)
+    return p
+
+
+def find_flavor(p, name):
+    """Вкус товара по названию (без учёта регистра) либо None."""
+    key = str(name or "").strip().casefold()
+    for f in (p.get("flavors") or []):
+        if str(f.get("name", "")).strip().casefold() == key:
+            return f
+    return None
+
+
+def _item_key(i):
+    try:
+        return int(i.get("id")), str(i.get("size") or "").strip().casefold()
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
 def qty_by_product(items):
     """Суммарное количество по id товара (один товар может быть в корзине с разными вкусами)."""
     totals = {}
@@ -799,11 +1062,42 @@ def qty_by_product(items):
     return totals
 
 
+def qty_by_variant(items):
+    """Количество по паре (id товара, вкус)."""
+    totals = {}
+    for i in items:
+        k = _item_key(i)
+        if k is None:
+            continue
+        try:
+            qty = int(i.get("qty") or 1)
+        except (TypeError, ValueError):
+            continue
+        totals[k] = totals.get(k, 0) + qty
+    return totals
+
+
 def check_stock(items, products_list=None, by_id=None):
-    """Только проверяет, хватает ли остатков (ничего не списывает). Возвращает текст ошибки либо None."""
-    totals = qty_by_product(items)
+    """Только проверяет, хватает ли остатков (ничего не списывает). Возвращает текст ошибки либо None.
+    У товаров со вкусами остаток проверяется отдельно по каждому вкусу."""
     if by_id is None:
         by_id = {p.get("id"): p for p in (products_list or load_products())}
+    flavored = {pid for pid, p in by_id.items() if p.get("flavors")}
+    # вкусы
+    for (pid, skey), qty in qty_by_variant(items).items():
+        if pid not in flavored:
+            continue
+        p = by_id[pid]
+        f = find_flavor(p, skey)
+        if f is None:
+            return f"«{p.get('name')}» — такого вкуса больше нет, обновите каталог"
+        have = int(f.get("stock") or 0)
+        if have <= 0:
+            return f"«{p.get('name')}» ({f['name']}) — нет в наличии"
+        if qty > have:
+            return f"«{p.get('name')}» ({f['name']}) — доступно только {have} шт."
+    # товары без вкусов — общий остаток, как раньше
+    totals = qty_by_product([i for i in items if _item_key(i) and _item_key(i)[0] not in flavored])
     for pid, qty in totals.items():
         p = by_id.get(pid)
         if not p or p.get("stock") is None:
@@ -818,35 +1112,41 @@ def check_stock(items, products_list=None, by_id=None):
 
 def reserve_stock(items):
     """Проверяет остатки и списывает их. Возвращает текст ошибки либо None. Вызывать под DATA_LOCK."""
-    totals = qty_by_product(items)
     products_list = load_products()
     by_id = {p.get("id"): p for p in products_list}
     err = check_stock(items, by_id=by_id)
     if err:
         return err
+    _move_stock(items, products_list, by_id, -1)
+    return None
+
+
+def _move_stock(items, products_list, by_id, sign):
     changed = False
-    for pid, qty in totals.items():
+    flavored = {pid for pid, p in by_id.items() if p.get("flavors")}
+    for (pid, skey), qty in qty_by_variant(items).items():
         p = by_id.get(pid)
-        if p and p.get("stock") is not None:
-            p["stock"] = max(0, int(p["stock"]) - qty)
+        if not p:
+            continue
+        if pid in flavored:
+            f = find_flavor(p, skey)
+            if f is not None:
+                f["stock"] = max(0, int(f.get("stock") or 0) + sign * qty)
+                changed = True
+        elif p.get("stock") is not None:
+            p["stock"] = max(0, int(p["stock"]) + sign * qty)
             changed = True
+    for pid in flavored:
+        apply_flavors(by_id[pid])        # пересчитать общий остаток
     if changed:
         save_products(products_list)
-    return None
 
 
 def shift_stock(items, sign):
     """Возвращает (sign=+1) или снова списывает (sign=-1, не ниже нуля) остатки по позициям заказа."""
-    totals = qty_by_product(items)
     products_list = load_products()
-    changed = False
-    for p in products_list:
-        qty = totals.get(p.get("id"))
-        if qty and p.get("stock") is not None:
-            p["stock"] = max(0, int(p["stock"]) + sign * qty)
-            changed = True
-    if changed:
-        save_products(products_list)
+    by_id = {p.get("id"): p for p in products_list}
+    _move_stock(items, products_list, by_id, sign)
 
 
 def sanitize_old_price(raw):
@@ -1526,6 +1826,12 @@ def create_order():
         if _p is None:
             abort(400, description=f"Товар «{it.get('name') or '—'}» больше не продаётся — обновите каталог")
         it["price"] = int(_p.get("price") or 0)
+        if _p.get("flavors"):
+            _f = find_flavor(_p, it.get("size"))
+            if _f is None:
+                abort(400, description=f"«{_p.get('name')}» — выберите вкус из списка (каталог мог обновиться)")
+            it["size"] = _f["name"]          # каноническое название вкуса
+            it["flavor"] = _f["name"]
 
     subtotal = sum(int(i.get("price") or 0) * int(i.get("qty") or 1) for i in items)
 
@@ -1636,6 +1942,8 @@ def create_order():
         f"· {i.get('name','—')} ({i.get('size') or '—'}) × {i.get('qty', 1)}"
         for i in items
     )
+    def _flv(i):
+        return f"\n   🍬 Вкус: {i.get('flavor')}" if i.get("flavor") else ""
     # для менеджера — с категорией и серией, т.к. названия вкусов повторяются в разных линейках
     _by_id = {p.get("id"): p for p in load_products()}
     def _where(i):
@@ -1645,7 +1953,8 @@ def create_order():
             p = None
         return " → ".join(x for x in (p.get("category"), p.get("subcategory")) if x) if p else ""
     admin_items_lines = "\n".join(
-        f"· {i.get('name','—')} ({i.get('size') or '—'}) × {i.get('qty', 1)}"
+        f"· {i.get('name','—')} ({i.get('size') or '—'}) × {i.get('qty', 1)} шт."
+        + _flv(i)
         + (f"\n   📁 {_where(i)}" if _where(i) else "")
         for i in items
     )
@@ -1927,7 +2236,9 @@ def admin_create_product():
         "image": images[0] if images else None,
         "stock": sanitize_stock(data.get("stock")),
         "cost_price": sanitize_cost_price(data.get("cost_price")),
+        "flavors": sanitize_flavors(data.get("flavors")),
     }
+    apply_flavors(product)
     items.append(product)
     save_products(items)
     return jsonify(admin_product(product)), 201
@@ -1963,6 +2274,11 @@ def admin_update_product(pid):
                 p["sizes"] = [s.strip() for s in sizes_raw.split(",") if s.strip()] if isinstance(sizes_raw, str) else (sizes_raw or p["sizes"])
             if "stock" in data:
                 p["stock"] = sanitize_stock(data.get("stock"))
+            if "flavors" in data:
+                p["flavors"] = sanitize_flavors(data.get("flavors"))
+                if not p["flavors"]:
+                    p.pop("flavors", None)
+            apply_flavors(p)          # у товара со вкусами sizes и общий stock считаются из вкусов
             if "desc" in data:
                 p["desc"] = (data.get("desc") or "").strip()
             if "swatch" in data:
@@ -1993,6 +2309,12 @@ def admin_delete_product(pid):
     removed = next((p for p in items if p.get("id") == pid), {})
     save_products(new_items)
     purge_unused_images(removed.get("images") or [])
+    try:                                   # оценки удалённого товара больше не нужны
+        with DocSession() as _db:
+            _db.query(ProductRating).filter(ProductRating.product_id == pid).delete()
+            _db.commit()
+    except Exception:
+        log.exception("Не удалось удалить оценки товара %s", pid)
     return jsonify({"ok": True})
 
 
@@ -2120,6 +2442,170 @@ def admin_delete_promo(pid):
     if len(new_promos) == len(promos):
         abort(404, description="Промокод не найден")
     save_promos(new_promos)
+    return jsonify({"ok": True})
+
+
+# --- Акции и объявления -------------------------------------------------
+
+def _parse_dt(raw):
+    """ISO-строка -> aware datetime (UTC) либо None."""
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _announcement_status(a, now=None):
+    """disabled | scheduled | expired | active."""
+    now = now or datetime.now(timezone.utc)
+    if not a.get("active", True):
+        return "disabled"
+    start, end = _parse_dt(a.get("starts_at")), _parse_dt(a.get("ends_at"))
+    if start and start > now:
+        return "scheduled"
+    if end and end <= now:
+        return "expired"
+    return "active"
+
+
+def _clean_dt(raw, label):
+    if raw in (None, ""):
+        return None
+    dt = _parse_dt(raw)
+    if dt is None:
+        abort(400, description=f"Некорректная дата: {label}")
+    return dt.isoformat()
+
+
+def _clean_link(raw):
+    link = (raw or "").strip()
+    if not link:
+        return ""
+    if link.startswith("@") and len(link) > 1:
+        link = "https://t.me/" + link[1:]
+    if not re.match(r"^(https?://|tg://)", link, re.I) or len(link) > 500:
+        abort(400, description="Ссылка должна начинаться с http://, https:// или @username")
+    return link
+
+
+def _clean_image(raw):
+    img = (raw or "").strip()
+    if not img:
+        return ""
+    if not (img.startswith("/uploads/") or re.match(r"^https?://", img, re.I)) or len(img) > 500:
+        abort(400, description="Некорректный адрес изображения")
+    return img
+
+
+def _announcement_fields(data, base=None):
+    """Проверяет поля и возвращает обновлённый словарь (base — существующее объявление)."""
+    a = dict(base or {})
+    if base is None or "title" in data:
+        title = (data.get("title") or "").strip()
+        if not title:
+            abort(400, description="Укажите заголовок")
+        if len(title) > 120:
+            abort(400, description="Заголовок не длиннее 120 символов")
+        a["title"] = title
+    if base is None or "text" in data:
+        text = (data.get("text") or "").strip()
+        if len(text) > 2000:
+            abort(400, description="Текст не длиннее 2000 символов")
+        a["text"] = text
+    if base is None or "image" in data:
+        a["image"] = _clean_image(data.get("image"))
+    if base is None or "link" in data:
+        a["link"] = _clean_link(data.get("link"))
+    if base is None or "link_label" in data:
+        a["link_label"] = (data.get("link_label") or "").strip()[:40]
+    if base is None or "starts_at" in data:
+        a["starts_at"] = _clean_dt(data.get("starts_at"), "начало публикации")
+    if base is None or "ends_at" in data:
+        a["ends_at"] = _clean_dt(data.get("ends_at"), "окончание публикации")
+    if "active" in data:
+        a["active"] = bool(data.get("active"))
+    a.setdefault("active", True)
+    s, e = _parse_dt(a.get("starts_at")), _parse_dt(a.get("ends_at"))
+    if s and e and e <= s:
+        abort(400, description="Окончание публикации должно быть позже начала")
+    return a
+
+
+def _announcement_out(a):
+    d = dict(a)
+    d["status"] = _announcement_status(a)
+    return d
+
+
+@app.route("/api/announcements", methods=["GET"])
+def public_announcements():
+    """Только действующие объявления: включены и попадают в срок публикации."""
+    now = datetime.now(timezone.utc)
+    items = [a for a in load_announcements() if _announcement_status(a, now) == "active"]
+    items.sort(key=lambda a: a.get("id", 0), reverse=True)
+    resp = jsonify([{"id": a["id"], "title": a.get("title", ""), "text": a.get("text", ""),
+                     "image": a.get("image", ""), "link": a.get("link", ""),
+                     "link_label": a.get("link_label", ""), "ends_at": a.get("ends_at")}
+                    for a in items])
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/admin/announcements", methods=["GET"])
+def admin_get_announcements():
+    require_admin()
+    items = load_announcements()
+    items.sort(key=lambda a: a.get("id", 0), reverse=True)
+    return jsonify([_announcement_out(a) for a in items])
+
+
+@app.route("/api/admin/announcements", methods=["POST"])
+@locked
+def admin_create_announcement():
+    require_admin()
+    data = request.get_json(force=True, silent=True) or {}
+    a = _announcement_fields(data)
+    items = load_announcements()
+    a["id"] = max([x.get("id", 0) for x in items], default=0) + 1
+    a["created_at"] = datetime.now(timezone.utc).isoformat()
+    items.append(a)
+    save_announcements(items)
+    return jsonify(_announcement_out(a)), 201
+
+
+@app.route("/api/admin/announcements/<int:aid>", methods=["PUT"])
+@locked
+def admin_update_announcement(aid):
+    require_admin()
+    data = request.get_json(force=True, silent=True) or {}
+    items = load_announcements()
+    for i, x in enumerate(items):
+        if x.get("id") == aid:
+            old_image = x.get("image")
+            items[i] = _announcement_fields(data, base=x)
+            save_announcements(items)
+            if old_image and old_image != items[i].get("image"):
+                purge_unused_images([old_image])
+            return jsonify(_announcement_out(items[i]))
+    abort(404, description="Объявление не найдено")
+
+
+@app.route("/api/admin/announcements/<int:aid>", methods=["DELETE"])
+@locked
+def admin_delete_announcement(aid):
+    require_admin()
+    items = load_announcements()
+    removed = next((x for x in items if x.get("id") == aid), None)
+    if removed is None:
+        abort(404, description="Объявление не найдено")
+    save_announcements([x for x in items if x.get("id") != aid])
+    if removed.get("image"):
+        purge_unused_images([removed["image"]])
     return jsonify({"ok": True})
 
 
